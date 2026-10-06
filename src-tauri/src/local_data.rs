@@ -41,6 +41,11 @@ impl LocalDataState {
         }
     }
 
+    /// The open store, if the local data is open.
+    pub fn store(&self) -> Option<Arc<scoplen_client_core::store::Store>> {
+        self.0.as_ref().ok().and_then(|data| data.store())
+    }
+
     fn get(&self) -> Result<Arc<LocalData>, LocalDataError> {
         self.0.clone()
     }

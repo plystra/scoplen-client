@@ -54,6 +54,8 @@ pnpm test
 pnpm license-check
 ```
 
+On macOS, `scripts/check-offline.sh target/release/bundle/macos/Scoplen.app` verifies that a built application makes no network connection while sync is disabled.
+
 To build the application and confirm that it launches:
 
 ```bash

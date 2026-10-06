@@ -116,3 +116,6 @@ jobs:
         env:
           SPL_SMOKE_TEST: "1"
         run: ${{ matrix.binary }}
+      - name: No network connection while sync is disabled
+        if: runner.os == 'macOS'
+        run: scripts/check-offline.sh target/release/bundle/macos/Scoplen.app

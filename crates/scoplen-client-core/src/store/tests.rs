@@ -212,3 +212,130 @@ fn the_vault_limit_stops_new_objects() {
     };
     assert!(store.write(rename).is_ok());
 }
+
+mod device_local {
+    use super::*;
+    use crate::store::device::{DeviceKeyPair, SESSION_HISTORY_LIMIT, SessionKind, SessionOutcome};
+    use scoplen_crypto::SecretVec;
+
+    fn open() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("local.db"), &key(1)).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn device_credentials_hold_a_secret_or_a_keystore_handle() {
+        let (_dir, store) = open();
+        let credential = scoplen_model::new_uuid_v7().unwrap();
+        assert!(store.device_credential(credential).unwrap().is_none());
+
+        store.set_device_secret(credential, b"-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+        let held = store.device_credential(credential).unwrap().unwrap();
+        assert_eq!(held.secret.unwrap().as_bytes(), b"-----BEGIN OPENSSH PRIVATE KEY-----");
+        assert_eq!(held.keystore_handle, None);
+
+        store.set_device_keystore_handle(credential, "se:0f3a").unwrap();
+        let held = store.device_credential(credential).unwrap().unwrap();
+        assert_eq!(
+            (held.secret, held.keystore_handle.as_deref()),
+            (None, Some("se:0f3a")),
+            "the secret is replaced"
+        );
+        assert!(!format!("{:?}", store.device_credential(credential).unwrap()).contains("OPENSSH"));
+
+        store.remove_device_credential(credential).unwrap();
+        assert!(store.device_credential(credential).unwrap().is_none());
+    }
+
+    #[test]
+    fn device_records_are_not_replicated_objects() {
+        let (_dir, store) = open();
+        store.set_device_secret(scoplen_model::new_uuid_v7().unwrap(), b"x").unwrap();
+        store.save_window_state("main", b"{}").unwrap();
+        assert!(
+            store.live_ids().unwrap().is_empty(),
+            "nothing device-local is an object a sync could send"
+        );
+    }
+
+    #[test]
+    fn the_device_key_pair_is_kept() {
+        let (_dir, store) = open();
+        assert!(store.device_key_pair().unwrap().is_none());
+        let pair = DeviceKeyPair {
+            signing: SecretVec::new(vec![1; 32]),
+            kem: SecretVec::new(vec![2; 32]),
+        };
+        store.set_device_key_pair(&pair).unwrap();
+        assert_eq!(store.device_key_pair().unwrap().unwrap(), pair);
+    }
+
+    #[test]
+    fn session_history_records_starts_and_ends_newest_first() {
+        let (_dir, store) = open();
+        let profile = scoplen_model::new_uuid_v7().unwrap();
+        let first = store.record_session_start(profile, SessionKind::Terminal).unwrap();
+        let second = store.record_session_start(profile, SessionKind::Files).unwrap();
+        store.record_session_end(first, SessionOutcome::Failed).unwrap();
+        assert!(matches!(
+            store.record_session_end(first, SessionOutcome::Closed),
+            Err(StoreError::NotFound(_))
+        ));
+
+        let recent = store.recent_sessions(10).unwrap();
+        assert_eq!(recent.iter().map(|e| e.id).collect::<Vec<_>>(), [second, first]);
+        assert_eq!(recent[1].outcome, Some(SessionOutcome::Failed));
+        assert!(recent[1].ended_at.is_some());
+        assert_eq!((recent[0].kind, recent[0].outcome), (SessionKind::Files, None));
+    }
+
+    #[test]
+    fn session_history_is_bounded() {
+        let (_dir, store) = open();
+        let profile = scoplen_model::new_uuid_v7().unwrap();
+        let first = store.record_session_start(profile, SessionKind::Terminal).unwrap();
+        for _ in 0..SESSION_HISTORY_LIMIT {
+            store.record_session_start(profile, SessionKind::Terminal).unwrap();
+        }
+        let recent = store.recent_sessions(SESSION_HISTORY_LIMIT + 10).unwrap();
+        assert_eq!(recent.len(), SESSION_HISTORY_LIMIT);
+        assert!(!recent.iter().any(|e| e.id == first), "the oldest entry was removed");
+    }
+
+    #[test]
+    fn scrollback_and_window_state_are_saved_and_replaced() {
+        let (_dir, store) = open();
+        let session = scoplen_model::new_uuid_v7().unwrap();
+        store.save_scrollback(session, b"$ ls\r\n").unwrap();
+        store.save_scrollback(session, b"$ ls\r\nREADME\r\n").unwrap();
+        assert_eq!(store.scrollback(session).unwrap().unwrap(), b"$ ls\r\nREADME\r\n");
+        store.remove_scrollback(session).unwrap();
+        assert!(store.scrollback(session).unwrap().is_none());
+
+        assert!(store.window_state("main").unwrap().is_none());
+        store.save_window_state("main", b"{\"width\":1200}").unwrap();
+        assert_eq!(store.window_state("main").unwrap().unwrap(), b"{\"width\":1200}");
+    }
+
+    #[test]
+    fn a_store_from_before_device_records_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local.db");
+        {
+            // A store created by a build that knew only migration 1.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            apply_key(&conn, &key(1)).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO device (singleton, device_id, clock, created_at) VALUES (1, ?1, 0, 0)",
+                params![scoplen_model::new_uuid_v7().unwrap().as_bytes().as_slice()],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path, &key(1)).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        store.save_window_state("main", b"{}").unwrap();
+    }
+}

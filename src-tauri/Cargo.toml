@@ -25,15 +25,13 @@ scoplen-client-platform.workspace = true
 scoplen-model.workspace = true
 uuid.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 tauri.workspace = true
 tauri-specta.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

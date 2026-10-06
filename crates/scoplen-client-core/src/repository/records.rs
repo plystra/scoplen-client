@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use scoplen_crypto::SecretVec;
 use scoplen_model::cbor::Value;
 use scoplen_model::{FieldPath, MapKey, Object, ObjectType};
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use super::fields::{self, Edit, Writes, text_key, text_value, uuid_key, uuid_value};
 use super::{Change, Meta, Record, RecordError};
@@ -273,36 +273,16 @@ pub struct Credential {
 
 /// A change to a credential. The secret is zeroized when the change is
 /// dropped and redacted when the change is formatted.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CredentialChange {
     pub name: Edit<String>,
     pub kind: Option<CredentialKind>,
     pub binding: Option<CredentialBinding>,
-    pub secret: Edit<Zeroizing<Vec<u8>>>,
+    pub secret: Edit<SecretVec>,
     pub devices: BTreeMap<Uuid, Option<DeviceKey>>,
     pub public_key: Edit<String>,
     pub provider: BTreeMap<String, Option<String>>,
     pub certificate_scope: Edit<Uuid>,
-}
-
-impl std::fmt::Debug for CredentialChange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let secret = match self.secret {
-            Edit::Keep => "Keep",
-            Edit::Set(_) => "Set([REDACTED])",
-            Edit::Clear => "Clear",
-        };
-        f.debug_struct("CredentialChange")
-            .field("name", &self.name)
-            .field("kind", &self.kind)
-            .field("binding", &self.binding)
-            .field("secret", &secret)
-            .field("devices", &self.devices)
-            .field("public_key", &self.public_key)
-            .field("provider", &self.provider)
-            .field("certificate_scope", &self.certificate_scope)
-            .finish()
-    }
 }
 
 impl Record for Credential {
@@ -343,7 +323,7 @@ impl Change for CredentialChange {
         w.edit(1, self.name, text_value);
         w.set(2, self.kind.map(|k| Value::UInt(k as u64)));
         w.set(3, self.binding.map(|b| Value::UInt(b as u64)));
-        w.edit(4, self.secret, |secret| Value::Bytes(secret.to_vec()));
+        w.edit(4, self.secret, |secret| Value::Bytes(secret.as_bytes().to_vec()));
         w.entries(5, self.devices, uuid_key, |d| {
             Value::Map(vec![
                 (Value::UInt(1), Value::Text(d.public_key)),
@@ -362,7 +342,7 @@ impl Change for CredentialChange {
 pub fn credential_secret(
     store: &crate::store::Store,
     id: Uuid,
-) -> Result<Option<Zeroizing<Vec<u8>>>, RecordError> {
+) -> Result<Option<SecretVec>, RecordError> {
     let Some(object) = store.get(id)? else { return Ok(None) };
     if object.object_type != ObjectType::CREDENTIAL {
         return Err(RecordError::WrongType {
@@ -371,7 +351,7 @@ pub fn credential_secret(
             expected: ObjectType::CREDENTIAL,
         });
     }
-    Ok(fields::bytes(&object, 4)?.map(Zeroizing::new))
+    Ok(fields::bytes(&object, 4)?.map(SecretVec::new))
 }
 
 // --- Route (4) ---

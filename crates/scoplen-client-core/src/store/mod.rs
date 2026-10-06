@@ -8,6 +8,7 @@
 //! local write is merged with the stored object through `scoplen-model`, so
 //! that a local edit and a later remote change combine by the same rules.
 
+pub mod device;
 mod migrations;
 
 use std::collections::HashSet;

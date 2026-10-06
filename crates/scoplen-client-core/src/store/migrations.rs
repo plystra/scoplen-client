@@ -32,4 +32,46 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX objects_by_type ON objects (type, deleted);
     CREATE INDEX objects_by_vault ON objects (vault);
     "#,
+    // 2: device-local records, which never replicate (`04-object-model.md` §4.9).
+    r#"
+    -- This device's own half of a credential whose binding is device: the
+    -- secret held here, or a handle to a key held by a keystore or hardware.
+    CREATE TABLE device_credentials (
+        credential      BLOB    PRIMARY KEY CHECK (length(credential) = 16),
+        secret          BLOB,
+        keystore_handle TEXT,
+        updated_at      INTEGER NOT NULL,
+        CHECK (secret IS NOT NULL OR keystore_handle IS NOT NULL)
+    ) STRICT, WITHOUT ROWID;
+
+    -- The device key pair used for sync enrollment, private parts included.
+    CREATE TABLE device_key_pair (
+        singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+        signing    BLOB    NOT NULL,
+        kem        BLOB    NOT NULL,
+        created_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE session_history (
+        id         BLOB    PRIMARY KEY CHECK (length(id) = 16),
+        profile    BLOB    NOT NULL CHECK (length(profile) = 16),
+        kind       INTEGER NOT NULL CHECK (kind IN (1, 2, 3)),
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        outcome    INTEGER CHECK (outcome IS NULL OR outcome IN (1, 2))
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX session_history_by_start ON session_history (started_at);
+
+    CREATE TABLE scrollback (
+        session    BLOB    PRIMARY KEY CHECK (length(session) = 16),
+        data       BLOB    NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE window_state (
+        window     TEXT    PRIMARY KEY,
+        state      BLOB    NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    "#,
 ];

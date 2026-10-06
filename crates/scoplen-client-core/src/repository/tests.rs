@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use scoplen_crypto::LocalDatabaseKey;
+use scoplen_crypto::SecretVec;
 use scoplen_model::{FieldPath, ObjectType, cbor::Value};
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use super::*;
 use crate::store::{LocalWrite, Store};
@@ -129,16 +129,16 @@ fn credential_secrets_never_appear_in_records() {
         name: Edit::Set("prod password".into()),
         kind: Some(CredentialKind::Password),
         binding: Some(CredentialBinding::Shared),
-        secret: Edit::Set(Zeroizing::new(b"hunter2".to_vec())),
+        secret: Edit::Set(SecretVec::new(b"hunter2".to_vec())),
         ..Default::default()
     };
     let formatted = format!("{change:?}");
-    assert!(formatted.contains("[REDACTED]") && !formatted.contains("104, 117"), "{formatted}");
+    assert!(formatted.contains("[REDACTED]") && !formatted.contains("hunter2"), "{formatted}");
     let credential = credentials.create(change).unwrap();
     assert!(credential.has_secret);
     assert!(!format!("{credential:?}").contains("hunter2"));
     assert_eq!(
-        credential_secret(&store, credential.meta.id).unwrap().unwrap().as_slice(),
+        credential_secret(&store, credential.meta.id).unwrap().unwrap().as_bytes(),
         b"hunter2"
     );
 
@@ -162,7 +162,7 @@ fn credential_secrets_never_appear_in_records() {
     let refused = credentials.create(CredentialChange {
         kind: Some(CredentialKind::SecurityKey),
         binding: Some(CredentialBinding::Shared),
-        secret: Edit::Set(Zeroizing::new(vec![1])),
+        secret: Edit::Set(SecretVec::new(vec![1])),
         ..Default::default()
     });
     assert!(refused.is_err(), "security keys cannot have shared secrets (04 §4.4)");

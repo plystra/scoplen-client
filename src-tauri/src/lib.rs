@@ -9,6 +9,7 @@ pub mod events;
 pub mod frames;
 pub mod local_data;
 mod smoke;
+mod window_state;
 
 use tauri::Manager as _;
 use tauri_specta::{Builder, Event as _, collect_commands, collect_events};
@@ -56,8 +57,25 @@ pub fn run() {
                     let _ = events::StoreChanged::from(change).emit(&handle);
                 }
             });
+            if let (Some(store), Some(window)) =
+                (local.store(), window_state::main_window(app.handle()))
+            {
+                window_state::restore(&window, &store);
+            }
             app.manage(local);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let app = window.app_handle();
+                if let (Some(store), Some(main)) = (
+                    app.state::<local_data::LocalDataState>().store(),
+                    window_state::main_window(app),
+                ) && main.label() == window.label()
+                {
+                    window_state::save(&main, &store);
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("the application failed to start");
