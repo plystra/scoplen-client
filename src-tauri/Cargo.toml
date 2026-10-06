@@ -22,6 +22,8 @@ tauri-build.workspace = true
 [dependencies]
 scoplen-client-core.workspace = true
 scoplen-client-platform.workspace = true
+scoplen-model.workspace = true
+uuid.workspace = true
 serde.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
@@ -29,6 +31,9 @@ thiserror.workspace = true
 zeroize.workspace = true
 tauri.workspace = true
 tauri-specta.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

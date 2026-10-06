@@ -12,7 +12,9 @@ use serde::Serialize;
 use specta::Type;
 
 use crate::local_key::{LocalKeyError, LocalKeys, Protection, Unlock};
-use crate::store::{Store, StoreError};
+use crate::store::{Change, Store, StoreError, Subscription};
+
+type ChangeListener = Arc<dyn Fn(&Change) + Send + Sync>;
 
 /// Whether the local data can be used, and if not, what is needed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
@@ -105,13 +107,21 @@ fn diagnostic(error: &dyn std::error::Error) -> String {
 
 enum State {
     Locked(Status),
-    Open { store: Arc<Store>, key: LocalDatabaseKey, protection: Protection },
+    Open {
+        store: Arc<Store>,
+        key: LocalDatabaseKey,
+        protection: Protection,
+        /// Keeps the change listener attached to this store; dropping it
+        /// detaches the listener.
+        subscription: Option<Subscription>,
+    },
 }
 
 /// The device's local data and the state of its store.
 pub struct LocalData {
     keys: LocalKeys,
     state: Mutex<State>,
+    listener: Mutex<Option<ChangeListener>>,
 }
 
 impl LocalData {
@@ -127,7 +137,11 @@ impl LocalData {
     }
 
     fn with_keys(keys: LocalKeys) -> Result<LocalData, LocalDataError> {
-        let data = LocalData { keys, state: Mutex::new(State::Locked(Status::NeedsNewPassphrase)) };
+        let data = LocalData {
+            keys,
+            state: Mutex::new(State::Locked(Status::NeedsNewPassphrase)),
+            listener: Mutex::new(None),
+        };
         data.restart()?;
         Ok(data)
     }
@@ -137,6 +151,16 @@ impl LocalData {
         match &*self.state() {
             State::Locked(status) => status.clone(),
             State::Open { protection, .. } => Status::Open { protection: *protection },
+        }
+    }
+
+    /// Calls `listener` after every committed change to the local data, in
+    /// whichever store is open now or later.
+    pub fn on_change(&self, listener: impl Fn(&Change) + Send + Sync + 'static) {
+        let listener: ChangeListener = Arc::new(listener);
+        *self.listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener.clone());
+        if let State::Open { store, subscription, .. } = &mut *self.state() {
+            *subscription = Some(store.subscribe(move |change| listener(change)));
         }
     }
 
@@ -220,7 +244,13 @@ impl LocalData {
 
     fn open(&self, key: LocalDatabaseKey, protection: Protection) -> Result<State, LocalDataError> {
         match Store::open(&self.keys.store_path(), &key) {
-            Ok(store) => Ok(State::Open { store: Arc::new(store), key, protection }),
+            Ok(store) => {
+                let store = Arc::new(store);
+                let listener = self.listener.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let subscription =
+                    listener.map(|listener| store.subscribe(move |change| listener(change)));
+                Ok(State::Open { store, key, protection, subscription })
+            }
             Err(StoreError::WrongKey) => {
                 Ok(State::Locked(Status::Unreadable { reason: UnreadableReason::WrongKey }))
             }
@@ -337,6 +367,29 @@ mod tests {
         keystore.store(&other).unwrap();
         let data = start(dir.path(), Some(&keystore));
         assert_eq!(data.status(), Status::Unreadable { reason: UnreadableReason::WrongKey });
+    }
+
+    #[test]
+    fn change_listeners_follow_the_store_across_unlocking() {
+        use std::sync::Mutex as StdMutex;
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = MemoryKeystore::default();
+        drop(start(dir.path(), Some(&keystore)).set_passphrase("p"));
+        let data = start(dir.path(), Some(&keystore));
+        let heard = Arc::new(StdMutex::new(0));
+        let count = heard.clone();
+        data.on_change(move |_| *count.lock().unwrap() += 1);
+        data.unlock("p").unwrap();
+        let store = data.store().unwrap();
+        let hosts = crate::repository::Repository::<crate::repository::Host>::new(&store);
+        hosts
+            .create(crate::repository::HostChange {
+                name: Some("a".into()),
+                address: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(*heard.lock().unwrap(), 1);
     }
 
     #[test]

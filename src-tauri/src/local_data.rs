@@ -31,6 +31,16 @@ impl LocalDataState {
         LocalDataState(data.map(Arc::new))
     }
 
+    /// Forwards committed changes, if the local data could be prepared.
+    pub fn on_change(
+        &self,
+        listener: impl Fn(&scoplen_client_core::store::Change) + Send + Sync + 'static,
+    ) {
+        if let Ok(data) = &self.0 {
+            data.on_change(listener);
+        }
+    }
+
     fn get(&self) -> Result<Arc<LocalData>, LocalDataError> {
         self.0.clone()
     }

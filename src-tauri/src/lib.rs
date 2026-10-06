@@ -5,12 +5,13 @@
 //! (`scoplen-docs/11-client-architecture.md` §1, §4).
 
 pub mod commands;
+pub mod events;
 pub mod frames;
 pub mod local_data;
 mod smoke;
 
 use tauri::Manager as _;
-use tauri_specta::{Builder, collect_commands};
+use tauri_specta::{Builder, Event as _, collect_commands, collect_events};
 
 /// Path of the generated frontend bindings, relative to this crate.
 pub const BINDINGS_PATH: &str = "../web/app/src/ipc/bindings.ts";
@@ -18,16 +19,18 @@ pub const BINDINGS_PATH: &str = "../web/app/src/ipc/bindings.ts";
 /// The typed command surface. The frontend bindings are generated from it, so
 /// the frontend and the core cannot drift.
 pub fn ipc() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![
-        commands::app_info,
-        commands::shell_ready,
-        local_data::local_data_status,
-        local_data::unlock_local_data,
-        local_data::create_local_passphrase,
-        local_data::set_local_passphrase,
-        local_data::remove_local_passphrase,
-        local_data::start_with_empty_local_data,
-    ])
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            commands::app_info,
+            commands::shell_ready,
+            local_data::local_data_status,
+            local_data::unlock_local_data,
+            local_data::create_local_passphrase,
+            local_data::set_local_passphrase,
+            local_data::remove_local_passphrase,
+            local_data::start_with_empty_local_data,
+        ])
+        .events(collect_events![events::StoreChanged])
 }
 
 /// Writes the TypeScript bindings for [`ipc`] to `path`.
@@ -46,7 +49,14 @@ pub fn run() {
         .setup(move |app| {
             ipc.mount_events(app);
             app.state::<smoke::SmokeTest>().arm(app.handle().clone());
-            app.manage(local_data::LocalDataState::start(app.handle()));
+            let local = local_data::LocalDataState::start(app.handle());
+            local.on_change({
+                let handle = app.handle().clone();
+                move |change| {
+                    let _ = events::StoreChanged::from(change).emit(&handle);
+                }
+            });
+            app.manage(local);
             Ok(())
         })
         .run(tauri::generate_context!())

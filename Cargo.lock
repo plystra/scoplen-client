@@ -3330,13 +3330,16 @@ version = "0.1.0"
 dependencies = [
  "scoplen-client-core",
  "scoplen-client-platform",
+ "scoplen-model",
  "serde",
+ "serde_json",
  "specta",
  "specta-typescript",
  "tauri",
  "tauri-build",
  "tauri-specta",
  "thiserror 2.0.21",
+ "uuid",
  "zeroize",
 ]
 
@@ -3372,7 +3375,7 @@ dependencies = [
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=cc549fd#cc549fddd9507a1e6c6a4c277a79cfbb049b5af8"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=a3bf208#a3bf2087548288240a973948d28b7061abb7f8c8"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -3397,7 +3400,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=cc549fd#cc549fddd9507a1e6c6a4c277a79cfbb049b5af8"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=a3bf208#a3bf2087548288240a973948d28b7061abb7f8c8"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",

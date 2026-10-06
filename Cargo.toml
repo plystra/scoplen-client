@@ -19,8 +19,8 @@ repository = "https://github.com/plystra/scoplen-client"
 scoplen-client-core = { path = "crates/scoplen-client-core" }
 scoplen-client-platform = { path = "crates/scoplen-client-platform" }
 rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
-scoplen-crypto = { git = "https://github.com/plystra/scoplen-proto.git", rev = "cc549fd" }
-scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "cc549fd" }
+scoplen-crypto = { git = "https://github.com/plystra/scoplen-proto.git", rev = "a3bf208" }
+scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "a3bf208" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }

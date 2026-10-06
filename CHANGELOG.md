@@ -9,4 +9,5 @@ All notable changes to the Scoplen desktop client are recorded here.
 - Added the about screen in English and Simplified Chinese, with the interface language chosen from the system's preferences.
 - Added the encrypted local store: SQLCipher with versioned migrations, a device identity and clock, field-by-field merging of local writes, change notifications, and the per-vault object limit.
 - Added protection of the local database key in the macOS Keychain and, on Windows, the TPM or DPAPI, with an optional local passphrase, a passphrase-only mode for systems without a keystore, and recovery by starting with empty data when the key is lost.
+- Added typed repositories for every object type, with field-level changes, clearing of optional fields, redacted credential secrets, and a `storeChanged` event to the interface after every committed change.
 - Fixed Windows test executables failing to start because they lacked the Common Controls manifest.
