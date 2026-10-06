@@ -10,11 +10,19 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+rusqlite.workspace = true
+scoplen-client-platform.workspace = true
+scoplen-crypto.workspace = true
+scoplen-model.workspace = true
 serde.workspace = true
 specta.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true

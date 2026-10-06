@@ -19,6 +19,7 @@ The repository applies `plystra-craft`, `plystra-craft-code`, and `plystra-craft
 
 ## Open gaps
 
-- Only the application shell exists. Local storage, inventory, terminal, connections, sync, and organization features are open roadmap gates, so the product's primary loop cannot yet be used.
+- The application shell and the encrypted local store exist. Inventory, terminal, connections, sync, and organization features are open roadmap gates, so the product's primary loop cannot yet be used.
+- The Windows TPM path of key storage cannot run on hosted CI runners, which have no TPM; only its DPAPI fallback is exercised there.
 - The Windows build and launch are defined in CI but have not been verified locally or by a completed CI run.
 - An accessibility audit against WCAG 2.2 AA on both platforms is scheduled for roadmap C15; the current evidence is automated axe checks, contrast checks of the tokens, and keyboard tests of the components.

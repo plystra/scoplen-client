@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 export { Button, type ButtonProps } from "./components/button";
+export { Field, type FieldProps } from "./components/field";
 export { Lockup, type LockupProps } from "./components/lockup";
 export { Mark, markPath, type MarkProps, type MarkVariant } from "./components/mark";
 export { Toolbar, type ToolbarProps } from "./components/toolbar";

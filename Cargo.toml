@@ -18,6 +18,9 @@ repository = "https://github.com/plystra/scoplen-client"
 [workspace.dependencies]
 scoplen-client-core = { path = "crates/scoplen-client-core" }
 scoplen-client-platform = { path = "crates/scoplen-client-platform" }
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
+scoplen-crypto = { git = "https://github.com/plystra/scoplen-proto.git", rev = "cc549fd" }
+scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "cc549fd" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
@@ -27,7 +30,10 @@ tauri = { version = "2.12.1", features = [] }
 tauri-build = { version = "2.5", features = [] }
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 thiserror = "2.0.17"
+tempfile = "3.23.0"
 tracing = "0.1.41"
+uuid = { version = "=1.16.0", features = ["v7"] }
+zeroize = "1.8.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

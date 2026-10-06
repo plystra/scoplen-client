@@ -5,6 +5,10 @@
 //! Keystores, hardware keys, system agents, notifications, and background
 //! execution differ between macOS and Windows; this crate gives the rest of
 //! the client one safe interface to each (`scoplen-docs/11-client-architecture.md` §3).
+//! Unsafe code is denied except in the modules that call platform APIs, where
+//! every block states why it is sound.
+
+pub mod keystore;
 
 /// The user's preferred languages as the operating system reports them, most
 /// preferred first, as BCP 47 or POSIX tags.

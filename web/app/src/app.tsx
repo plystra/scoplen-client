@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-import { Button, Lockup, SkipLink } from "@scoplen/ui";
+import { Button, SkipLink } from "@scoplen/ui";
 import { useCallback, useEffect, useState } from "react";
 import { I18nProvider, useI18n } from "./i18n";
-import { commands, type AppInfo, type Locale } from "./ipc/bindings";
+import { commands, type AppInfo, type Locale, type Status } from "./ipc/bindings";
+import { CreatePassphraseScreen, UnlockScreen, UnreadableScreen } from "./local-data";
+import { Shell } from "./shell";
 
-type Startup = { state: "loading" } | { state: "ready"; info: AppInfo } | { state: "failed"; reference: string };
+type Startup =
+  { state: "loading" } | { state: "ready"; info: AppInfo; status: Status } | { state: "failed"; reference: string };
 
 /**
  * The language used only if the core cannot be reached, when its choice
@@ -21,8 +24,14 @@ export function App() {
 
   // Asks the core; state changes only when it answers.
   const request = useCallback(() => {
-    commands.appInfo().then(
-      (info) => setStartup({ state: "ready", info }),
+    Promise.all([commands.appInfo(), commands.localDataStatus()]).then(
+      ([info, status]) =>
+        status.status === "ok"
+          ? setStartup({ state: "ready", info, status: status.data })
+          : setStartup({
+              state: "failed",
+              reference: status.error.kind === "failed" ? status.error.reference : status.error.kind,
+            }),
       (error: unknown) => setStartup({ state: "failed", reference: String(error) }),
     );
   }, []);
@@ -40,37 +49,38 @@ export function App() {
   }, [locale]);
 
   useEffect(() => {
-    if (startup.state === "ready") void commands.shellReady();
+    if (startup.state !== "loading") void commands.shellReady();
   }, [startup.state]);
+
+  const setStatus = (status: Status) =>
+    setStartup((current) => (current.state === "ready" ? { ...current, status } : current));
 
   return (
     <I18nProvider locale={locale}>
-      {startup.state === "ready" ? <Shell info={startup.info} /> : null}
+      <SkipTarget />
+      {startup.state === "ready" ? <Gate info={startup.info} status={startup.status} onStatus={setStatus} /> : null}
       {startup.state === "failed" ? <StartupError reference={startup.reference} onRetry={retry} /> : null}
     </I18nProvider>
   );
 }
 
-function Shell({ info }: { info: AppInfo }) {
+function SkipTarget() {
   const { t } = useI18n();
-  return (
-    <>
-      <SkipLink target="main">{t("shell.skip")}</SkipLink>
-      <header className="flex h-12 items-center border-b border-border px-4">
-        <Lockup size="1.0625rem" />
-      </header>
-      <main id="main" tabIndex={-1} className="mx-auto max-w-xl px-6 py-16 focus:outline-none">
-        <h1 className="font-serif text-2xl font-medium">{t("about.title")}</h1>
-        <p className="mt-3 text-base">{t("about.summary")}</p>
-        <div className="mt-8 space-y-2 text-sm text-muted-foreground">
-          <p>{t("about.version", { version: info.version, platform: info.platform })}</p>
-          <p>{t("about.maturity")}</p>
-          <p>{t("about.project")}</p>
-          <p>{t("about.license")}</p>
-        </div>
-      </main>
-    </>
-  );
+  return <SkipLink target="main">{t("shell.skip")}</SkipLink>;
+}
+
+/** Shows the screen the state of the local data calls for. */
+function Gate({ info, status, onStatus }: { info: AppInfo; status: Status; onStatus: (status: Status) => void }) {
+  switch (status.state) {
+    case "open":
+      return <Shell info={info} status={status} onStatus={onStatus} />;
+    case "needsPassphrase":
+      return <UnlockScreen onStatus={onStatus} />;
+    case "needsNewPassphrase":
+      return <CreatePassphraseScreen onStatus={onStatus} />;
+    case "unreadable":
+      return <UnreadableScreen reason={status.reason} onStatus={onStatus} />;
+  }
 }
 
 function StartupError({ reference, onRetry }: { reference: string; onRetry: () => void }) {

@@ -6,4 +6,10 @@
 //! above the platform layer (`scoplen-docs/11-client-architecture.md` §1), so
 //! that it is the same on every desktop platform and testable without a window.
 
+pub mod local_data;
+pub mod local_key;
 pub mod locale;
+pub mod store;
+
+#[cfg(test)]
+mod testing;

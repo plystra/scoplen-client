@@ -11,6 +11,18 @@ export const commands = {
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
 	/**  Called by the frontend once its first screen has rendered. */
 	shellReady: () => __TAURI_INVOKE<void>("shell_ready"),
+	/**  Where the local data stands. */
+	localDataStatus: () => typedError<Status, LocalDataError>(__TAURI_INVOKE("local_data_status")),
+	/**  Opens the store with the local passphrase. */
+	unlockLocalData: (passphrase: string) => typedError<Status, LocalDataError>(__TAURI_INVOKE("unlock_local_data", { passphrase })),
+	/**  On a system without a keystore, chooses the passphrase for new local data. */
+	createLocalPassphrase: (passphrase: string) => typedError<Status, LocalDataError>(__TAURI_INVOKE("create_local_passphrase", { passphrase })),
+	/**  Sets or changes the local passphrase. */
+	setLocalPassphrase: (passphrase: string) => typedError<Status, LocalDataError>(__TAURI_INVOKE("set_local_passphrase", { passphrase })),
+	/**  Removes the local passphrase, leaving the key in the keystore. */
+	removeLocalPassphrase: () => typedError<Status, LocalDataError>(__TAURI_INVOKE("remove_local_passphrase")),
+	/**  Keeps unreadable local data aside and starts with empty local data. */
+	startWithEmptyLocalData: () => typedError<Status, LocalDataError>(__TAURI_INVOKE("start_with_empty_local_data")),
 };
 
 /* Types */
@@ -23,6 +35,24 @@ export type AppInfo = {
 	/**  The interface language chosen from the system's preferences. */
 	locale: Locale,
 };
+
+/**  A failure of an operation on the local data, as shown to the user. */
+export type LocalDataError = 
+/**  The passphrase is not correct. Nothing changed. */
+{ kind: "wrongPassphrase" } | 
+/**  The passphrase is empty. Nothing changed. */
+{ kind: "emptyPassphrase" } | 
+/**  The passphrase cannot be removed without a keystore. Nothing changed. */
+{ kind: "passphraseRequired" } | 
+/**
+ *  The operation needs the store to be in another state, for example
+ *  unlocked. Nothing changed.
+ */
+{ kind: "invalidState" } | 
+/**  The platform or the disk failed. Nothing changed. */
+{ kind: "failed"; 
+/**  A diagnostic reference for support, free of secrets. */
+reference: string };
 
 /**
  *  A language the interface is written in (`11-client-architecture.md` §4).
@@ -43,4 +73,49 @@ export type Platform =
 "windows" | 
 /**  Any other system; Phase 1 ships only macOS and Windows builds. */
 "other";
+
+/**  How the local database key is protected. */
+export type Protection = 
+/**  The platform keystore alone. */
+"keystore" | 
+/**  The platform keystore and a local passphrase. */
+"keystoreAndPassphrase" | 
+/**  A local passphrase alone, on a platform without a keystore. */
+"passphraseOnly";
+
+/**  Whether the local data can be used, and if not, what is needed. */
+export type Status = 
+/**  The store is open. */
+{ state: "open"; 
+/**  How its key is protected. */
+protection: Protection } | 
+/**  The user must enter the local passphrase. */
+{ state: "needsPassphrase"; 
+/**  How the key is protected. */
+protection: Protection } | 
+/**  First launch without a keystore: the user must choose a passphrase. */
+{ state: "needsNewPassphrase" } | 
+/**  The store exists but cannot be opened on this device. */
+{ state: "unreadable"; 
+/**  Why. */
+reason: UnreadableReason };
+
+/**  Why the local store cannot be opened. */
+export type UnreadableReason = 
+/**  Its key is missing from the keystore. */
+"keyMissing" | 
+/**  The key does not decrypt it. */
+"wrongKey" | 
+/**  It was written by a newer version of Scoplen. */
+"newerVersion";
+
+/* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
 

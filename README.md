@@ -10,7 +10,7 @@ Owner and operator: immoses (Moses Qiu). Responsible maintainer: immoses (Moses 
 
 Maturity: Exploration. Maintenance: Active.
 
-The application shell is in place: a Tauri 2 application for macOS and Windows, the Scoplen identity and design tokens, typed IPC generated from Rust with a binary channel transport, and a design system foundation with keyboard navigation, screen-reader labels, light and dark themes, increased-contrast and reduced-motion support, and ICU localization in English and Simplified Chinese. The application shows its about screen. It does not yet store hosts, open connections, or sync; that work follows the client track of [`scoplen-docs/17-implementation-roadmap.md`](../scoplen-docs/17-implementation-roadmap.md), which is the only record of implementation status.
+The application shell is in place: a Tauri 2 application for macOS and Windows, the Scoplen identity and design tokens, typed IPC generated from Rust with a binary channel transport, and a design system foundation with keyboard navigation, screen-reader labels, light and dark themes, increased-contrast and reduced-motion support, and ICU localization in English and Simplified Chinese. It keeps an encrypted local store: a SQLCipher database whose key is held in the macOS Keychain or, on Windows, by the TPM or DPAPI, optionally with a local passphrase. The application shows its about screen and lets you set the passphrase. It does not yet manage hosts, open connections, or sync; that work follows the client track of [`scoplen-docs/17-implementation-roadmap.md`](../scoplen-docs/17-implementation-roadmap.md), which is the only record of implementation status.
 
 ## What it does not do
 
@@ -33,7 +33,7 @@ The terminal component package `@scoplen/terminal` is added in `web/terminal/` u
 
 ## Development
 
-Requirements: the Rust toolchain pinned in `rust-toolchain.toml` (installed by rustup), Node.js 24.16.0 (`.nvmrc`), pnpm 11, and the Tauri prerequisites for your platform (Xcode Command Line Tools on macOS; Microsoft C++ Build Tools and WebView2 on Windows). Python 3 with Pillow and fontTools is needed only to regenerate the icon or the Chinese heading font.
+Requirements: read access to `plystra/scoplen-proto` (Cargo fetches it through the git CLI, so set `CARGO_NET_GIT_FETCH_WITH_CLI=true`), the Rust toolchain pinned in `rust-toolchain.toml` (installed by rustup), Node.js 24.16.0 (`.nvmrc`), pnpm 11, and the Tauri prerequisites for your platform (Xcode Command Line Tools on macOS; Microsoft C++ Build Tools and WebView2 on Windows). Python 3 with Pillow and fontTools is needed only to regenerate the icon or the Chinese heading font.
 
 ```bash
 pnpm install
@@ -63,7 +63,7 @@ SPL_SMOKE_TEST=1 target/release/bundle/macos/Scoplen.app/Contents/MacOS/scoplen
 
 ## Data and privacy
 
-The current build stores nothing and makes no network connections. Later builds store hosts, keys, and settings in an encrypted local database on the device; what is stored and how it is protected is specified in `scoplen-docs/11-client-architecture.md` and `05-cryptography-and-keys.md`, and will be described here as it is implemented.
+Everything Scoplen keeps is stored on the device, in the application data directory (`~/Library/Application Support/com.scoplen.client` on macOS, `%APPDATA%\com.scoplen.client` on Windows). The store is a SQLCipher database encrypted with a random 256-bit key. That key is held in the macOS Keychain (only on this device, after the first unlock) or, on Windows, wrapped by a TPM-held key or by DPAPI for the current user. With a local passphrase, the key is additionally wrapped with a key derived from the passphrase by Argon2id; forgetting the passphrase makes the data unrecoverable. If the key is lost, Scoplen keeps the unreadable store under a new name and can start with empty data. The current build makes no network connections.
 
 ## Security
 

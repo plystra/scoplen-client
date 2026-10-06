@@ -6,6 +6,7 @@
 
 pub mod commands;
 pub mod frames;
+pub mod local_data;
 mod smoke;
 
 use tauri::Manager as _;
@@ -17,8 +18,16 @@ pub const BINDINGS_PATH: &str = "../web/app/src/ipc/bindings.ts";
 /// The typed command surface. The frontend bindings are generated from it, so
 /// the frontend and the core cannot drift.
 pub fn ipc() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new()
-        .commands(collect_commands![commands::app_info, commands::shell_ready])
+    Builder::<tauri::Wry>::new().commands(collect_commands![
+        commands::app_info,
+        commands::shell_ready,
+        local_data::local_data_status,
+        local_data::unlock_local_data,
+        local_data::create_local_passphrase,
+        local_data::set_local_passphrase,
+        local_data::remove_local_passphrase,
+        local_data::start_with_empty_local_data,
+    ])
 }
 
 /// Writes the TypeScript bindings for [`ipc`] to `path`.
@@ -37,6 +46,7 @@ pub fn run() {
         .setup(move |app| {
             ipc.mount_events(app);
             app.state::<smoke::SmokeTest>().arm(app.handle().clone());
+            app.manage(local_data::LocalDataState::start(app.handle()));
             Ok(())
         })
         .run(tauri::generate_context!())
