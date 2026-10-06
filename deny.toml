@@ -1,0 +1,39 @@
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+version = 2
+ignore = [
+    # `paste` is archived but has no known vulnerability. It is a compile-time
+    # macro used by `specta`, which generates the IPC bindings; no `paste` code
+    # runs in the application. Remove when specta drops it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time macro via specta; no runtime code" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

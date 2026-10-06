@@ -1,0 +1,24 @@
+[package]
+name = "scoplen-client-platform"
+description = "Platform integration of the Scoplen desktop client on macOS and Windows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+sys-locale.workspace = true
+
+# The platform layer is the only crate allowed to contain unsafe code
+# (`scoplen-docs/11-client-architecture.md` §3). It is denied by default and
+# allowed only on the module that needs it, with each block documented.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"

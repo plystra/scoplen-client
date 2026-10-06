@@ -1,0 +1,6 @@
+packages:
+  - web/app
+  - web/ui
+minimumReleaseAgeExclude:
+  - vite@8.3.3
+saveExact: true

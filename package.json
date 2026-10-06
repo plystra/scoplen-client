@@ -1,0 +1,32 @@
+{
+  "name": "scoplen-client",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.5.1",
+  "engines": {
+    "node": "24.16.0"
+  },
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "bindings": "cargo run --quiet -p scoplen-client-app --example export_bindings",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "license-check": "node scripts/check-licenses.mjs",
+    "fonts": "python3 scripts/build-cjk-font.py",
+    "icon": "python3 scripts/generate-icon.py && tauri icon src-tauri/icons/source.png -o src-tauri/icons"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@tauri-apps/cli": "2.12.1",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1"
+  }
+}

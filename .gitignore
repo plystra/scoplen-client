@@ -1,0 +1,7 @@
+/target/
+node_modules/
+dist/
+.cargo/config.toml
+*.tsbuildinfo
+.DS_Store
+/src-tauri/gen/

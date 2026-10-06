@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/scoplen-client-core",
+    "crates/scoplen-client-platform",
+    "crates/scoplen-mosh",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.99"
+authors = ["Scoplen maintainers"]
+repository = "https://github.com/plystra/scoplen-client"
+
+[workspace.dependencies]
+scoplen-client-core = { path = "crates/scoplen-client-core" }
+scoplen-client-platform = { path = "crates/scoplen-client-platform" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+specta-typescript = "=0.0.12"
+sys-locale = "0.3.2"
+tauri = { version = "2.12.1", features = [] }
+tauri-build = { version = "2.5", features = [] }
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+thiserror = "2.0.17"
+tracing = "0.1.41"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Scoplen",
+  "mainBinaryName": "scoplen",
+  "identifier": "com.scoplen.client",
+  "build": {
+    "frontendDist": "../web/app/dist",
+    "devUrl": "http://localhost:5192",
+    "beforeDevCommand": "pnpm --filter @scoplen/app dev",
+    "beforeBuildCommand": "pnpm --filter @scoplen/app build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Scoplen",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 480,
+        "minHeight": 400,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self'",
+        "connect-src": "ipc: http://ipc.localhost"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis"],
+    "category": "DeveloperTool",
+    "copyright": "Scoplen maintainers",
+    "license": "Apache-2.0",
+    "shortDescription": "SSH client and bastion",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+  }
+}

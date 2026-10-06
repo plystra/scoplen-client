@@ -1,0 +1,11 @@
+{
+  "display": { "start": 8, "end": 56, "length": 26, "vertical": 9, "horizontal": 7.5, "radius": 3 },
+  "small": { "start": 4, "end": 60, "length": 28, "vertical": 12, "horizontal": 11, "radius": 2 },
+  "colors": {
+    "ink": "#1c1917",
+    "paper": "#f5f3ef",
+    "accent": "#1f6f6b",
+    "accentDark": "#7cc4bd",
+    "muted": "#57534e"
+  }
+}

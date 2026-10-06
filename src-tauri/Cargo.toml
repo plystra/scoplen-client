@@ -1,0 +1,34 @@
+[package]
+name = "scoplen-client-app"
+description = "The Scoplen desktop application shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "scoplen_client_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "scoplen"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+scoplen-client-core.workspace = true
+scoplen-client-platform.workspace = true
+serde.workspace = true
+specta.workspace = true
+specta-typescript.workspace = true
+thiserror.workspace = true
+tauri.workspace = true
+tauri-specta.workspace = true
+
+[lints]
+workspace = true

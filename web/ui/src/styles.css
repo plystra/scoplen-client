@@ -1,0 +1,146 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * Scoplen design tokens and base styles (`scoplen-docs/18-visual-identity.md`).
+ * Components use only the semantic names below, never raw colors. Light and
+ * dark follow the system; increased contrast and forced colors are honored.
+ */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/lora";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* Chinese headings: Noto Serif SC at 600, subset to exactly the characters the
+   interface uses (scripts/build-cjk-font.py). */
+@font-face {
+  font-family: "Scoplen Serif SC";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./fonts/scoplen-serif-sc.woff2") format("woff2");
+}
+
+@source "./";
+
+:root {
+  color-scheme: light dark;
+
+  --background: #f5f3ef;
+  --foreground: #1c1917;
+  --raised: #fbfaf8;
+  --inset: #ebe8e2;
+  --muted-foreground: #57534e;
+  --border: #e2ded6;
+  --border-strong: #c9c3b8;
+  --primary: #1f6f6b;
+  --primary-hover: #185955;
+  --primary-foreground: #f5f3ef;
+  --attention: #b0451f;
+  --attention-foreground: #f5f3ef;
+  --ring: #1f6f6b;
+
+  --font-sans:
+    "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --font-serif: "Lora Variable", "Scoplen Serif SC", "Songti SC", serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --duration-micro: 100ms;
+  --duration-state: 160ms;
+  --duration-overlay: 220ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #1c1917;
+    --foreground: #f5f3ef;
+    --raised: #24201d;
+    --inset: #141210;
+    --muted-foreground: #a8a29e;
+    --border: rgba(255, 255, 255, 0.12);
+    --border-strong: rgba(255, 255, 255, 0.24);
+    --primary: #7cc4bd;
+    --primary-hover: #9ad3cd;
+    --primary-foreground: #1c1917;
+    --attention: #e8875f;
+    --attention-foreground: #1c1917;
+    --ring: #7cc4bd;
+  }
+}
+
+/* Increased contrast: secondary text and structure take the full foreground. */
+@media (prefers-contrast: more) {
+  :root {
+    --muted-foreground: var(--foreground);
+    --border: var(--foreground);
+    --border-strong: var(--foreground);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-micro: 0ms;
+    --duration-state: 0ms;
+    --duration-overlay: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-raised: var(--raised);
+  --color-inset: var(--inset);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-attention: var(--attention);
+  --color-attention-foreground: var(--attention-foreground);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  html {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+
+  /* Chinese typesetting: platform sans for text, more leading, no tracking,
+     spacing between Chinese and Latin text. */
+  :lang(zh-Hans) {
+    text-autospace: normal;
+  }
+  :lang(zh-Hans) :is(h1, h2, h3) {
+    font-weight: 600;
+    letter-spacing: 0;
+    line-height: 1.35;
+  }
+  :lang(zh-Hans) :is(p, li, dd) {
+    line-height: 1.75;
+  }
+}
