@@ -11,7 +11,6 @@ publish = false
 
 [lib]
 name = "scoplen_client_app"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
 name = "scoplen"
