@@ -38,6 +38,8 @@ export const commands = {
 	sessionConnect: (profileId: string, command: string | null, pty: boolean, sessionId: string, frames: Channel<ArrayBuffer>) => typedError<null, string>(__TAURI_INVOKE("session_connect", { profileId, command, pty, sessionId, frames })),
 	/**  Sends one bounded input chunk to a live shell session. */
 	sessionInput: (sessionId: string, data: number[]) => typedError<null, string>(__TAURI_INVOKE("session_input", { sessionId, data })),
+	/**  Notifies a live SSH PTY of a new character-cell size. */
+	sessionResize: (sessionId: string, columns: number, rows: number) => typedError<null, string>(__TAURI_INVOKE("session_resize", { sessionId, columns, rows })),
 	/**  Closes the transport for a live shell session. */
 	sessionCloseTransport: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("session_close_transport", { sessionId })),
 	/**  Returns which inventory areas have content. */
