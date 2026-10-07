@@ -183,7 +183,7 @@ pub struct LoginSummary {
 
 /// The kind of a device-local session shown in the Recent area.
 #[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum RecentSessionKind {
     Terminal,
@@ -193,7 +193,7 @@ pub enum RecentSessionKind {
 
 /// How a device-local session ended, when it is no longer open.
 #[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum RecentSessionOutcome {
     Closed,
@@ -228,6 +228,39 @@ pub struct RecentSession {
     pub ended_at: Option<String>,
     /// End status, if it has ended.
     pub outcome: Option<RecentSessionOutcome>,
+}
+
+/// Why a device-local session event could not be applied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SessionError {
+    /// The profile identifier was not a UUID.
+    #[error("the login identifier is invalid")]
+    InvalidProfileId,
+    /// The session identifier was not a UUID.
+    #[error("the session identifier is invalid")]
+    InvalidSessionId,
+    /// The login no longer exists on this device.
+    #[error("the login was not found")]
+    ProfileNotFound,
+    /// The session no longer exists in local history.
+    #[error("the session was not found")]
+    SessionNotFound,
+    /// The session already has an ending outcome.
+    #[error("the session is already closed")]
+    AlreadyClosed,
+    /// A live session must report an outcome before it can be forgotten.
+    #[error("an active session must be closed before it is forgotten")]
+    ActiveSession,
+    /// The connection engine has not been connected to this history service.
+    #[error("connection transport is not available in this build")]
+    TransportUnavailable,
+    /// The local store failed without exposing its internals or secrets.
+    #[error("{reference}")]
+    Failed {
+        /// A diagnostic reference safe to show for retryable failures.
+        reference: String,
+    },
 }
 
 /// A host group in the sidebar.
@@ -561,6 +594,78 @@ impl Inventory {
                 })
             })
             .collect())
+    }
+
+    /// Records the opening of a session after validating its live login.
+    ///
+    /// The connection engine calls this only after it has accepted ownership
+    /// of a transport. This method does not open a socket or claim that an SSH
+    /// connection succeeded; it records the device-local lifecycle event.
+    pub fn open_session(
+        &self,
+        profile_id: String,
+        kind: RecentSessionKind,
+    ) -> Result<RecentSession, SessionError> {
+        let profile_id = parse_id(&profile_id).map_err(|_| SessionError::InvalidProfileId)?;
+        let profiles = self.profiles().map_err(session_failure)?;
+        let Some(profile) = profiles.iter().find(|profile| profile.meta.id == profile_id) else {
+            return Err(SessionError::ProfileNotFound);
+        };
+        let hosts = self.host_records().map_err(session_failure)?;
+        if !hosts.iter().any(|host| host.meta.id == profile.host) {
+            return Err(SessionError::ProfileNotFound);
+        }
+        let session = self
+            .store
+            .record_session_start(profile_id, session_store_kind(kind))
+            .map_err(session_failure)?;
+        self.recent_sessions()
+            .map_err(|error| SessionError::Failed { reference: error.to_string() })?
+            .into_iter()
+            .find(|entry| entry.id == id(session))
+            .ok_or_else(|| SessionError::Failed {
+                reference: "the opened session disappeared from local history".into(),
+            })
+    }
+
+    /// Records the terminal outcome of an open session.
+    pub fn close_session(
+        &self,
+        session_id: String,
+        outcome: RecentSessionOutcome,
+    ) -> Result<(), SessionError> {
+        let session_id = parse_id(&session_id).map_err(|_| SessionError::InvalidSessionId)?;
+        let Some(session) = self.store.session(session_id).map_err(session_failure)? else {
+            return Err(SessionError::SessionNotFound);
+        };
+        if session.ended_at.is_some() {
+            return Err(SessionError::AlreadyClosed);
+        }
+        self.store
+            .record_session_end(session_id, session_store_outcome(outcome))
+            .map_err(session_failure)
+    }
+
+    /// Removes one ended session and any saved scrollback for it.
+    pub fn forget_session(&self, session_id: String) -> Result<(), SessionError> {
+        let session_id = parse_id(&session_id).map_err(|_| SessionError::InvalidSessionId)?;
+        match self.store.forget_session(session_id) {
+            Ok(()) => Ok(()),
+            Err(StoreError::NotFound(_)) => Err(SessionError::SessionNotFound),
+            Err(StoreError::SessionActive(_)) => Err(SessionError::ActiveSession),
+            Err(error) => Err(session_failure(error)),
+        }
+    }
+
+    /// Returns an explicit boundary error until a connection engine owns the
+    /// reconnect operation. It never creates a new history row or reports a
+    /// successful connection on its own.
+    pub fn reconnect_session(&self, session_id: String) -> Result<(), SessionError> {
+        let session_id = parse_id(&session_id).map_err(|_| SessionError::InvalidSessionId)?;
+        if self.store.session(session_id).map_err(session_failure)?.is_none() {
+            return Err(SessionError::SessionNotFound);
+        }
+        Err(SessionError::TransportUnavailable)
     }
 
     /// Gets one host and all of its logins.
@@ -959,10 +1064,25 @@ fn recent_session_kind(kind: SessionKind) -> RecentSessionKind {
     }
 }
 
+fn session_store_kind(kind: RecentSessionKind) -> SessionKind {
+    match kind {
+        RecentSessionKind::Terminal => SessionKind::Terminal,
+        RecentSessionKind::Files => SessionKind::Files,
+        RecentSessionKind::Forward => SessionKind::Forward,
+    }
+}
+
 fn recent_session_outcome(outcome: SessionOutcome) -> RecentSessionOutcome {
     match outcome {
         SessionOutcome::Closed => RecentSessionOutcome::Closed,
         SessionOutcome::Failed => RecentSessionOutcome::Failed,
+    }
+}
+
+fn session_store_outcome(outcome: RecentSessionOutcome) -> SessionOutcome {
+    match outcome {
+        RecentSessionOutcome::Closed => SessionOutcome::Closed,
+        RecentSessionOutcome::Failed => SessionOutcome::Failed,
     }
 }
 
@@ -1076,6 +1196,10 @@ fn group_failed(reference: &str) -> GroupError {
 
 fn failed(reference: &str) -> Failure {
     Failure::Failed { reference: reference.into() }
+}
+
+fn session_failure(error: impl std::error::Error) -> SessionError {
+    SessionError::Failed { reference: diagnostic(&error) }
 }
 
 fn diagnostic(error: &dyn std::error::Error) -> String {
@@ -1303,6 +1427,50 @@ mod tests {
             !inventory.areas().unwrap().recent,
             "orphan history does not expose an empty Recent area"
         );
+    }
+
+    #[test]
+    fn session_lifecycle_records_real_events_and_has_safe_cleanup_boundaries() {
+        let inventory = inventory();
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let profile = details.logins[0].id.clone();
+
+        let open = inventory.open_session(profile.clone(), RecentSessionKind::Terminal).unwrap();
+        assert_eq!(open.outcome, None);
+        assert!(matches!(
+            inventory.forget_session(open.id.clone()),
+            Err(SessionError::ActiveSession)
+        ));
+
+        inventory.close_session(open.id.clone(), RecentSessionOutcome::Failed).unwrap();
+        assert!(matches!(
+            inventory.close_session(open.id.clone(), RecentSessionOutcome::Closed),
+            Err(SessionError::AlreadyClosed)
+        ));
+        assert!(matches!(
+            inventory.reconnect_session(open.id.clone()),
+            Err(SessionError::TransportUnavailable)
+        ));
+        inventory.forget_session(open.id.clone()).unwrap();
+        assert!(matches!(inventory.reconnect_session(open.id), Err(SessionError::SessionNotFound)));
+
+        let orphan = id(scoplen_model::new_uuid_v7().unwrap());
+        assert!(matches!(
+            inventory.open_session(orphan, RecentSessionKind::Files),
+            Err(SessionError::ProfileNotFound)
+        ));
+        assert!(matches!(
+            inventory.open_session("not-a-uuid".into(), RecentSessionKind::Forward),
+            Err(SessionError::InvalidProfileId)
+        ));
     }
 
     #[test]

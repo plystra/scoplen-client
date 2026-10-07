@@ -18,6 +18,9 @@ import type {
   NewHost,
   Outcome,
   RecentSession,
+  RecentSessionKind,
+  RecentSessionOutcome,
+  SessionError,
 } from "../inventory/api";
 
 const groups: GroupSummary[] = [
@@ -215,6 +218,7 @@ export function sampleInventory(
   let hosts = initial.map((h) => ({ ...h }));
   let availableGroups = groups.map((group) => ({ ...group }));
   const sessions = seededRecentSessions.map((session) => ({ ...session }));
+  let sessionSequence = 0;
   const deleted = new Map<string, HostDetails>();
   const listeners = new Set<() => void>();
   const changed = () => listeners.forEach((l) => l());
@@ -284,6 +288,57 @@ export function sampleInventory(
             error: { kind: "failed" as const, reference: "the local session history is unavailable" },
           })
         : wait(ok(recentSessionRows())),
+    openSession: (profileId: string, kind: RecentSessionKind) => {
+      const current = hosts.find((host) => host.logins.some((login) => login.id === profileId));
+      const login = current?.logins.find((item) => item.id === profileId);
+      if (!current || !login) {
+        return wait({ status: "error" as const, error: { kind: "profileNotFound" as const } });
+      }
+      const now = String(Date.now());
+      const session: RecentSession = {
+        id: `s-gallery-${++sessionSequence}`,
+        hostId: current.id,
+        hostName: current.name,
+        address: current.address,
+        port: current.port,
+        username: login.username,
+        kind,
+        startedAt: now,
+        endedAt: null,
+        outcome: null,
+      };
+      sessions.unshift(session);
+      changed();
+      return wait(ok(session));
+    },
+    closeSession: (id: string, outcome: RecentSessionOutcome) => {
+      const index = sessions.findIndex((session) => session.id === id);
+      if (index < 0) return wait({ status: "error" as const, error: { kind: "sessionNotFound" as const } });
+      const current = sessions[index]!;
+      if (current.outcome !== null)
+        return wait({ status: "error" as const, error: { kind: "alreadyClosed" as const } });
+      const updated = { ...current, endedAt: String(Date.now()), outcome };
+      sessions[index] = updated;
+      changed();
+      return wait(ok(null));
+    },
+    reconnectSession: (id: string) => {
+      if (!sessions.some((session) => session.id === id)) {
+        return wait({ status: "error" as const, error: { kind: "sessionNotFound" as const } });
+      }
+      const error: SessionError = { kind: "transportUnavailable" };
+      return wait({ status: "error" as const, error });
+    },
+    forgetSession: (id: string) => {
+      const index = sessions.findIndex((session) => session.id === id);
+      if (index < 0) return wait({ status: "error" as const, error: { kind: "sessionNotFound" as const } });
+      if (sessions[index]!.outcome === null) {
+        return wait({ status: "error" as const, error: { kind: "activeSession" as const } });
+      }
+      sessions.splice(index, 1);
+      changed();
+      return wait(ok(null));
+    },
     host: (id) => wait(ok(hosts.find((h) => h.id === id) ?? null)),
     addHost: (input: NewHost) => {
       if (!/^[a-z0-9.:\-[\]]+$/i.test(input.address))

@@ -68,6 +68,16 @@ export interface HostDetails extends HostSummary {
 export type RecentSessionKind = "terminal" | "files" | "forward";
 export type RecentSessionOutcome = "closed" | "failed";
 
+export type SessionError =
+  | { kind: "invalidProfileId" }
+  | { kind: "invalidSessionId" }
+  | { kind: "profileNotFound" }
+  | { kind: "sessionNotFound" }
+  | { kind: "alreadyClosed" }
+  | { kind: "activeSession" }
+  | { kind: "transportUnavailable" }
+  | { kind: "failed"; reference: string };
+
 /** A redacted device-local session entry, newest first. */
 export interface RecentSession {
   id: Id;
@@ -182,6 +192,14 @@ export interface InventoryApi {
   hosts(source: HostSource, query: string): Promise<Outcome<HostSummary[], Failure>>;
   /** The newest live device-local sessions, newest first. */
   recentSessions(): Promise<Outcome<RecentSession[], Failure>>;
+  /** Records a lifecycle open event from a real connection owner. */
+  openSession(profileId: Id, kind: RecentSessionKind): Promise<Outcome<RecentSession, SessionError>>;
+  /** Records the outcome from a real connection owner. */
+  closeSession(id: Id, outcome: RecentSessionOutcome): Promise<Outcome<null, SessionError>>;
+  /** Requests a reconnect; returns an explicit error until transport is wired. */
+  reconnectSession(id: Id): Promise<Outcome<null, SessionError>>;
+  /** Forgets one ended local session and its saved scrollback. */
+  forgetSession(id: Id): Promise<Outcome<null, SessionError>>;
   host(id: Id): Promise<Outcome<HostDetails | null, Failure>>;
   addHost(host: NewHost): Promise<Outcome<HostDetails, AddHostError>>;
   updateHost(id: Id, host: EditHost): Promise<Outcome<HostDetails, EditHostError>>;

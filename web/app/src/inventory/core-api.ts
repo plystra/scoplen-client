@@ -20,6 +20,9 @@ import {
   type HostSummary as IpcHostSummary,
   type NewHost as IpcNewHost,
   type RecentSession as IpcRecentSession,
+  type RecentSessionKind as IpcRecentSessionKind,
+  type RecentSessionOutcome as IpcRecentSessionOutcome,
+  type SessionError as IpcSessionError,
 } from "../ipc/bindings";
 import type {
   AddHostError,
@@ -36,6 +39,9 @@ import type {
   NewHost,
   Outcome,
   RecentSession,
+  RecentSessionKind,
+  RecentSessionOutcome,
+  SessionError,
 } from "./api";
 
 type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
@@ -69,9 +75,25 @@ export function createInventoryApi(): InventoryApi {
         (await commands.inventoryHosts(source as IpcHostSource, query)) as Result<IpcHostSummary[], IpcFailure>,
       ),
     recentSessions: async () =>
-      inventoryOutcome(
-        (await commands.inventoryRecentSessions()) as Result<IpcRecentSession[], IpcFailure>,
-      ) as Outcome<RecentSession[], Failure>,
+      inventoryOutcome((await commands.inventoryRecentSessions()) as Result<IpcRecentSession[], IpcFailure>) as Outcome<
+        RecentSession[],
+        Failure
+      >,
+    openSession: async (profileId: string, kind: RecentSessionKind) =>
+      outcome(
+        (await commands.sessionOpen(profileId, kind as IpcRecentSessionKind)) as Result<
+          IpcRecentSession,
+          IpcSessionError
+        >,
+      ) as Outcome<RecentSession, SessionError>,
+    closeSession: async (id: string, sessionOutcome: RecentSessionOutcome) =>
+      outcome(
+        (await commands.sessionClose(id, sessionOutcome as IpcRecentSessionOutcome)) as Result<null, IpcSessionError>,
+      ) as Outcome<null, SessionError>,
+    reconnectSession: async (id: string) =>
+      outcome((await commands.sessionReconnect(id)) as Result<null, IpcSessionError>) as Outcome<null, SessionError>,
+    forgetSession: async (id: string) =>
+      outcome((await commands.sessionForget(id)) as Result<null, IpcSessionError>) as Outcome<null, SessionError>,
     host: async (id: string) =>
       inventoryOutcome((await commands.inventoryHost(id)) as Result<IpcHostDetails | null, IpcFailure>),
     addHost: async (input: NewHost) =>
@@ -103,7 +125,7 @@ export function createInventoryApi(): InventoryApi {
     },
     onChange: (listener) => {
       let stopped = false;
-      let unlisten: (() => void | Promise<void>) | undefined;
+      const unlisteners: (() => void | Promise<void>)[] = [];
       const dispose = (callback: () => void | Promise<void>) => {
         void Promise.resolve(callback()).catch(() => undefined);
       };
@@ -113,13 +135,17 @@ export function createInventoryApi(): InventoryApi {
         })
         .then((unlistenFn) => {
           if (stopped) dispose(unlistenFn);
-          else unlisten = unlistenFn;
+          else unlisteners.push(unlistenFn);
+        });
+      void events.sessionChanged
+        .listen(() => listener())
+        .then((unlistenFn) => {
+          if (stopped) dispose(unlistenFn);
+          else unlisteners.push(unlistenFn);
         });
       return () => {
         stopped = true;
-        const callback = unlisten;
-        unlisten = undefined;
-        if (callback) dispose(callback);
+        while (unlisteners.length > 0) dispose(unlisteners.pop()!);
       };
     },
   };

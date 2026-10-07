@@ -319,6 +319,26 @@ mod device_local {
     }
 
     #[test]
+    fn session_forgetting_requires_an_ended_session_and_removes_scrollback() {
+        let (_dir, store) = open();
+        let profile = scoplen_model::new_uuid_v7().unwrap();
+        let active = store.record_session_start(profile, SessionKind::Terminal).unwrap();
+        store.save_scrollback(active, b"secret terminal output").unwrap();
+        assert!(
+            matches!(store.forget_session(active), Err(StoreError::SessionActive(id)) if id == active)
+        );
+        assert!(store.session(active).unwrap().is_some());
+
+        store.record_session_end(active, SessionOutcome::Closed).unwrap();
+        store.forget_session(active).unwrap();
+        assert!(store.session(active).unwrap().is_none());
+        assert!(store.scrollback(active).unwrap().is_none());
+        assert!(
+            matches!(store.forget_session(active), Err(StoreError::NotFound(id)) if id == active)
+        );
+    }
+
+    #[test]
     fn session_history_is_bounded() {
         let (_dir, store) = open();
         let profile = scoplen_model::new_uuid_v7().unwrap();

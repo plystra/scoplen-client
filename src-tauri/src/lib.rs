@@ -29,6 +29,10 @@ pub fn ipc() -> Builder<tauri::Wry> {
             inventory::inventory_groups,
             inventory::inventory_hosts,
             inventory::inventory_recent_sessions,
+            inventory::session_open,
+            inventory::session_close,
+            inventory::session_reconnect,
+            inventory::session_forget,
             inventory::inventory_host,
             inventory::inventory_add_host,
             inventory::inventory_set_favorite,
@@ -45,13 +49,24 @@ pub fn ipc() -> Builder<tauri::Wry> {
             local_data::remove_local_passphrase,
             local_data::start_with_empty_local_data,
         ])
-        .events(collect_events![events::StoreChanged])
+        .events(collect_events![events::StoreChanged, events::SessionChanged])
 }
 
 /// Writes the TypeScript bindings for [`ipc`] to `path`.
 pub fn write_bindings(path: &std::path::Path) -> Result<(), specta_typescript::Error> {
     let header = "// SPDX-License-Identifier: Apache-2.0\n// Generated from src-tauri by `pnpm bindings`. Do not edit.\n";
-    ipc().export(specta_typescript::Typescript::default().header(header), path)
+    ipc().export(specta_typescript::Typescript::default().header(header), path)?;
+
+    // Specta emits spaces before the newline for some documented union members.
+    // Normalize them here so the generated artifact remains diff-clean and the
+    // committed file is byte-for-byte identical to `pnpm bindings` output.
+    let generated = std::fs::read_to_string(path)?;
+    let normalized = generated.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+    let normalized = if generated.ends_with('\n') { format!("{normalized}\n") } else { normalized };
+    if normalized != generated {
+        std::fs::write(path, normalized)?;
+    }
+    Ok(())
 }
 
 /// Starts the application.

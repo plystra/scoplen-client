@@ -187,6 +187,51 @@ impl Store {
         if changed == 0 { Err(StoreError::NotFound(session)) } else { Ok(()) }
     }
 
+    /// Reads one device-local session, including an ended state when present.
+    pub fn session(&self, session: Uuid) -> Result<Option<SessionEntry>, StoreError> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+            "SELECT id, profile, kind, started_at, ended_at, outcome FROM session_history WHERE id = ?1",
+            params![session.as_bytes().as_slice()],
+            decode_session,
+        )
+        .optional()?)
+    }
+
+    /// Forgets one ended session and its saved terminal contents.
+    ///
+    /// Active sessions are retained until their owner records an outcome. This
+    /// prevents a cleanup action from making a live session disappear from
+    /// device-local state while a transport still owns it.
+    pub fn forget_session(&self, session: Uuid) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let ended = tx
+            .query_row(
+                "SELECT ended_at FROM session_history WHERE id = ?1",
+                params![session.as_bytes().as_slice()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        match ended {
+            None => Err(StoreError::NotFound(session)),
+            Some(None) => Err(StoreError::SessionActive(session)),
+            Some(Some(_)) => {
+                tx.execute(
+                    "DELETE FROM scrollback WHERE session = ?1",
+                    params![session.as_bytes().as_slice()],
+                )?;
+                tx.execute(
+                    "DELETE FROM session_history WHERE id = ?1",
+                    params![session.as_bytes().as_slice()],
+                )?;
+                tx.commit()?;
+                Ok(())
+            }
+        }
+    }
+
     /// The most recent sessions, newest first.
     pub fn recent_sessions(&self, limit: usize) -> Result<Vec<SessionEntry>, StoreError> {
         let conn = self.conn();
@@ -194,33 +239,10 @@ impl Store {
             "SELECT id, profile, kind, started_at, ended_at, outcome FROM session_history
              ORDER BY started_at DESC, id DESC LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![limit as i64], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (id, profile, kind, started_at, ended_at, outcome) = row?;
-            Ok(SessionEntry {
-                id: uuid_from(&id)?,
-                profile: uuid_from(&profile)?,
-                kind: match kind {
-                    1 => SessionKind::Terminal,
-                    2 => SessionKind::Files,
-                    _ => SessionKind::Forward,
-                },
-                started_at: started_at as u64,
-                ended_at: ended_at.map(|t| t as u64),
-                outcome: outcome
-                    .map(|o| if o == 1 { SessionOutcome::Closed } else { SessionOutcome::Failed }),
-            })
-        })
-        .collect()
+        statement
+            .query_map(params![limit as i64], decode_session)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// Keeps a session's serialized terminal contents, for restoring it after
@@ -274,4 +296,38 @@ impl Store {
             })
             .optional()?)
     }
+}
+
+fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionEntry> {
+    let id = row.get::<_, Vec<u8>>(0)?;
+    let profile = row.get::<_, Vec<u8>>(1)?;
+    let kind = row.get::<_, i64>(2)?;
+    let started_at = row.get::<_, i64>(3)?;
+    let ended_at = row.get::<_, Option<i64>>(4)?;
+    let outcome = row.get::<_, Option<i64>>(5)?;
+    Ok(SessionEntry {
+        id: uuid_from(&id).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?,
+        profile: uuid_from(&profile).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?,
+        kind: match kind {
+            1 => SessionKind::Terminal,
+            2 => SessionKind::Files,
+            _ => SessionKind::Forward,
+        },
+        started_at: started_at as u64,
+        ended_at: ended_at.map(|t| t as u64),
+        outcome: outcome
+            .map(|o| if o == 1 { SessionOutcome::Closed } else { SessionOutcome::Failed }),
+    })
 }

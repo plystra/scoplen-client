@@ -22,6 +22,10 @@ Contract: `web/app/src/inventory/api.ts` (`InventoryApi`). Screens: `inventory/h
 | `groups()` | Every group with its parent and host count. |
 | `hosts(source, query)` | Hosts from the source (all, favorites, recent, or one group and its subgroups) whose name, address, username, or `key:value` tag contains the query, case-insensitive; favorites first, then by name. Orphaned hosts are not listed. `username`, `loginCount`, and `route` describe the default login, else the only one. |
 | `recentSessions()` | The newest device-local session history entries, with the current Host label and login metadata. Entries whose Host or Login was deleted are omitted; no credential, scrollback, or live connection data is returned. Timestamps are decimal Unix-millisecond strings at the IPC boundary. |
+| `openSession(profileId, kind)` | Records an open event after a real connection owner has accepted a transport; the login must still exist. It does not open a socket. The result is the same redacted session DTO shown by `recentSessions()`. |
+| `closeSession(id, outcome)` | Records `closed` or `failed` from the connection owner. A missing or already-ended session is rejected, and a failed write leaves history unchanged. |
+| `reconnectSession(id)` | Validates the history entry and returns an explicit transport-unavailable error until the connection engine is connected. It never creates a new row or reports a successful connection by itself. |
+| `forgetSession(id)` | Deletes one ended device-local history row and its saved scrollback. Active sessions cannot be forgotten; orphaned rows can still be cleaned up by identifier. |
 | `host(id)` | The host with every login, `null` when it no longer exists. A key credential carries its public key. |
 | `addHost(host)` | Creates the host, one login, and the credential, with a direct route, as one change (§7.6 tier 0). `name` defaults to the address and `port` to 22. Password and pasted or generated keys are stored as shared-binding credentials; a key file is read and stored the same way; `agent` creates an agent credential. Each `AddHostError` names the field it belongs to; nothing is saved on error. |
 | `setFavorite(id, favorite)` | Sets the favorite field. |
@@ -31,6 +35,12 @@ Contract: `web/app/src/inventory/api.ts` (`InventoryApi`). Screens: `inventory/h
 | `onChange(listener)` | Calls the listener after any inventory change; built on the `storeChanged` event (`ipc/store-events.ts`). |
 
 Every operation that can fail returns `Outcome`; a `Failure` carries a reference for support, free of secrets.
+
+Session lifecycle commands emit `sessionChanged` after a successful open, close, or
+forget operation so the Recent view reloads without polling. The event carries only
+the session identifier and transition. Transport ownership, reconnect, terminal
+output, and credentials remain outside this history boundary until the connection
+orchestrator and protocol core are implemented.
 
 ## Connecting a contract
 

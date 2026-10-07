@@ -71,11 +71,15 @@ describe("the host list", () => {
     expect(screen.getByRole("list", { name: "Recent sessions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /prod-api-01.*Terminal/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /prod-db-01.*Files/i })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect prod-api-01" }));
+    expect(await screen.findByText("Reconnect is not available yet; no connection was opened.")).toBeTruthy();
 
     unmount();
     show(sampleInventory(sampleHosts(), { failRecentSessions: true }));
     await screen.findByText("7 hosts");
-    await userEvent.click(within(screen.getByRole("navigation", { name: "Hosts" })).getByRole("button", { name: "Recent" }));
+    await userEvent.click(
+      within(screen.getByRole("navigation", { name: "Hosts" })).getByRole("button", { name: "Recent" }),
+    );
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("local session history is unavailable");
     expect(await screen.findByText("2 hosts")).toBeTruthy();
