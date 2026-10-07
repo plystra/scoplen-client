@@ -86,6 +86,7 @@ describe("the host list", () => {
     const { container, unmount } = show(sampleInventory([]));
     expect(await screen.findByRole("heading", { name: "No hosts yet" })).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Add host" })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Import OpenSSH config" })).toBeTruthy();
     expect(await violations(container)).toEqual([]);
     unmount();
 
@@ -93,6 +94,152 @@ describe("the host list", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Nothing was changed.");
     expect(alert.textContent).toContain("database is locked");
+  });
+});
+
+describe("importing an OpenSSH config", () => {
+  async function open(api: InventoryApi) {
+    show(api);
+    await screen.findByRole("heading", { name: "No hosts yet" });
+    await userEvent.click(screen.getByRole("button", { name: "Import OpenSSH config" }));
+    return screen.findByRole("dialog", { name: "Review OpenSSH import" });
+  }
+
+  it("previews only importable hosts and reports skipped hosts and directives", async () => {
+    const api = sampleInventory([]);
+    const preview = vi.spyOn(api, "previewOpenSshConfig");
+    const { container } = show(api);
+    await screen.findByRole("heading", { name: "No hosts yet" });
+    await userEvent.click(screen.getByRole("button", { name: "Import OpenSSH config" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review OpenSSH import" });
+    expect(preview).toHaveBeenCalledWith("/Users/mia/.ssh/config");
+    expect(within(dialog).getByText("Source: /Users/mia/.ssh/config")).toBeTruthy();
+    expect(within(dialog).getByRole("heading", { name: "Hosts to import (1)" })).toBeTruthy();
+    expect(within(dialog).getByText("prod-api")).toBeTruthy();
+    expect(within(dialog).getByText("deploy@prod.example.com")).toBeTruthy();
+    expect(within(dialog).getByRole("heading", { name: "Skipped hosts (1)" })).toBeTruthy();
+    expect(within(dialog).getByText("legacy")).toBeTruthy();
+    expect(within(dialog).getByText(/Uses unsupported ForwardAgent/)).toBeTruthy();
+    expect(within(dialog).getByRole("heading", { name: "Unsupported directives (1)" })).toBeTruthy();
+    expect(within(dialog).getByText("line 7: ForwardAgent")).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("Cancel");
+    expect(await violations(container)).toEqual([]);
+  });
+
+  it("cancels without importing", async () => {
+    const api = sampleInventory([]);
+    const importHosts = vi.spyOn(api, "importOpenSshConfig");
+    const dialog = await open(api);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review OpenSSH import" })).toBeNull());
+    expect(importHosts).not.toHaveBeenCalled();
+    expect(screen.getByText("0 hosts")).toBeTruthy();
+  });
+
+  it("imports the listed hosts and reports skipped hosts in the result", async () => {
+    const api = sampleInventory([]);
+    const importHosts = vi.spyOn(api, "importOpenSshConfig");
+    const dialog = await open(api);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import hosts" }));
+    expect(importHosts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "/Users/mia/.ssh/config",
+        entries: [{ alias: "prod-api", address: "prod.example.com", port: 22, username: "deploy", identityFile: null }],
+      }),
+    );
+    expect(await screen.findByText("Imported 1 host. Skipped 1 host.")).toBeTruthy();
+    expect(await screen.findByText("1 host")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "prod-api" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review OpenSSH import" })).toBeNull();
+  });
+
+  it("shows a report with no importable hosts and disables the import action", async () => {
+    const api = sampleInventory([]);
+    api.previewOpenSshConfig = vi.fn(async (path) => ({
+      status: "ok" as const,
+      data: {
+        path,
+        entries: [],
+        skippedHosts: [
+          { alias: "prod-*", line: 1, reason: { kind: "globalRules" as const, directive: "Host *" } },
+          { alias: "duplicate", line: 4, reason: { kind: "duplicateAlias" as const } },
+          { alias: "bad-port", line: 8, reason: { kind: "invalidValue" as const, directive: "Port" } },
+        ],
+        unsupported: [{ line: 2, directive: "Include" }],
+      },
+    }));
+    const importHosts = vi.spyOn(api, "importOpenSshConfig");
+    const dialog = await open(api);
+    expect(within(dialog).getByText(/No hosts can be imported from this file/)).toBeTruthy();
+    expect(within(dialog).getByRole("heading", { name: "Hosts to import (0)" })).toBeTruthy();
+    expect(within(dialog).getByRole("heading", { name: "Skipped hosts (3)" })).toBeTruthy();
+    expect(within(dialog).getByText(/Affected by Host \* rules/)).toBeTruthy();
+    expect(within(dialog).getByText(/appears in more than one Host block/)).toBeTruthy();
+    expect(within(dialog).getByText(/The Port value cannot be imported/)).toBeTruthy();
+    expect(within(dialog).getByText("line 2: Include")).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "Import hosts" }).hasAttribute("disabled")).toBe(true);
+    expect(importHosts).not.toHaveBeenCalled();
+  });
+
+  it("keeps the report open after an import error and allows retry", async () => {
+    const api = sampleInventory([]);
+    const importOriginal = api.importOpenSshConfig;
+    const importHosts = vi
+      .spyOn(api, "importOpenSshConfig")
+      .mockResolvedValueOnce({ status: "error", error: { kind: "identityNotFound", path: "/missing/key" } })
+      .mockImplementation(importOriginal);
+    const dialog = await open(api);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import hosts" }));
+    expect(await within(dialog).findByRole("alert")).toHaveProperty(
+      "textContent",
+      "The import failed. No hosts were changed. The identity file could not be read: /missing/key. Check the path in the config and try again.",
+    );
+    expect(screen.getByText("0 hosts")).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import hosts" }));
+    expect(importHosts).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("Imported 1 host. Skipped 1 host.")).toBeTruthy();
+  });
+
+  it("requires a new preview when the source changed", async () => {
+    const api = sampleInventory([]);
+    api.importOpenSshConfig = vi.fn(async () => ({
+      status: "error" as const,
+      error: { kind: "sourceChanged" as const },
+    }));
+    const dialog = await open(api);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Import hosts" }));
+    expect(await within(dialog).findByRole("alert")).toHaveProperty(
+      "textContent",
+      "The import failed. No hosts were changed. The source config changed since this preview. Close it and choose the file again.",
+    );
+    expect(within(dialog).getByRole("button", { name: "Import hosts" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("0 hosts")).toBeTruthy();
+  });
+
+  it("reports preview failures without opening an import dialog", async () => {
+    const api = sampleInventory([]);
+    api.previewOpenSshConfig = vi.fn(async () => ({ status: "error" as const, error: { kind: "tooLarge" as const } }));
+    const importHosts = vi.spyOn(api, "importOpenSshConfig");
+    show(api);
+    await screen.findByRole("heading", { name: "No hosts yet" });
+    await userEvent.click(screen.getByRole("button", { name: "Import OpenSSH config" }));
+    expect(
+      await screen.findByText(/The preview could not be prepared.*config exceeds the import size limit/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Review OpenSSH import" })).toBeNull();
+    expect(importHosts).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when the file picker is canceled", async () => {
+    const api = sampleInventory([]);
+    api.chooseOpenSshConfig = vi.fn(async () => null);
+    const preview = vi.spyOn(api, "previewOpenSshConfig");
+    show(api);
+    await screen.findByRole("heading", { name: "No hosts yet" });
+    await userEvent.click(screen.getByRole("button", { name: "Import OpenSSH config" }));
+    await waitFor(() => expect(api.chooseOpenSshConfig).toHaveBeenCalledTimes(1));
+    expect(preview).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Review OpenSSH import" })).toBeNull();
   });
 });
 

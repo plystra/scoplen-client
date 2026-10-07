@@ -39,6 +39,18 @@ export const commands = {
 	inventoryDeleteHost: (id: string) => typedError<Deletion, Failure>(__TAURI_INVOKE("inventory_delete_host", { id })),
 	/**  Restores a deletion made by this running desktop process. */
 	inventoryUndoDelete: (token: string) => typedError<null, Failure>(__TAURI_INVOKE("inventory_undo_delete", { token })),
+	/**
+	 *  Reads an OpenSSH config for the empty-inventory preview without modifying
+	 *  the source file or local store.
+	 */
+	inventoryPreviewOpenSshConfig: (path: string) => typedError<OpenSshImportPreview, OpenSshImportError>(__TAURI_INVOKE("inventory_preview_open_ssh_config", { path })),
+	/**  Imports a previously previewed OpenSSH config into an empty inventory. */
+	inventoryImportOpenSshConfig: (preview: OpenSshImportPreview) => typedError<OpenSshImportResult, OpenSshImportError>(__TAURI_INVOKE("inventory_import_open_ssh_config", { preview })),
+	/**
+	 *  Opens the conventional `~/.ssh/config` picker used by the empty-list
+	 *  onboarding flow. Cancellation returns `null`.
+	 */
+	chooseOpenSshConfig: () => typedError<string | null, Failure>(__TAURI_INVOKE("choose_open_ssh_config")),
 	/**  Opens the native private-key file picker; `null` means cancellation. */
 	chooseKeyFile: () => typedError<string | null, Failure>(__TAURI_INVOKE("choose_key_file")),
 	/**  Where the local data stands. */
@@ -73,6 +85,10 @@ export type AddHostError =
 { kind: "emptyPassword" } | 
 /**  The selected key file does not exist or could not be read. */
 { kind: "keyNotFound" } | 
+/**  The selected key file exceeds the bounded local import size. */
+{ kind: "keyTooLarge" } | 
+/**  Reusing a private key would require scanning beyond the bounded local limit. */
+{ kind: "keyReuseLimit" } | 
 /**  The input is not a private key. */
 { kind: "notAPrivateKey" } | 
 /**  Public key text was supplied where private key text is needed. */
@@ -326,6 +342,103 @@ export type NewHost = {
 	username: string,
 	/**  Authentication material. */
 	signIn: SignIn,
+};
+
+/**
+ *  A representable entry found in an OpenSSH configuration file. This is a
+ *  preview DTO: it never contains private key material.
+ */
+export type OpenSshImportEntry = {
+	/**  The `Host` alias that becomes the display name. */
+	alias: string,
+	/**  The resolved host name or address. */
+	address: string,
+	/**  SSH port, defaulting to 22. */
+	port: number,
+	/**  The configured user, or the current local user when omitted. */
+	username: string,
+	/**  An identity file to read at commit time, if configured. */
+	identityFile: string | null,
+};
+
+/**  Why the empty-list OpenSSH import could not proceed. */
+export type OpenSshImportError = 
+/**  The selected file could not be read. */
+{ kind: "fileNotFound" } | 
+/**  The source was not valid UTF-8. */
+{ kind: "notText" } | 
+/**  The config or its simple-host list exceeds the bounded onboarding import. */
+{ kind: "tooLarge" } | 
+/**  No representable host block was found. */
+{ kind: "noHosts" } | 
+/**  The source changed after the user reviewed its preview. */
+{ kind: "sourceChanged" } | 
+/**  Import is intentionally limited to the first-launch empty inventory. */
+{ kind: "inventoryNotEmpty" } | 
+/**  An identity file named by a representable entry could not be read. */
+{ kind: "identityNotFound"; 
+/**  The path, which is not secret. */
+path: string } | 
+/**  The selected file or local store failed without a partial import. */
+{ kind: "failed"; 
+/**  A diagnostic reference safe to show for retryable failures. */
+reference: string };
+
+/**  A preview of importing one OpenSSH configuration file. */
+export type OpenSshImportPreview = {
+	/**  The selected source path. */
+	path: string,
+	/**  Entries that can be represented by the tier-0 importer. */
+	entries: OpenSshImportEntry[],
+	/**  Literal aliases excluded from import, with a visible reason. */
+	skippedHosts: OpenSshSkippedHost[],
+	/**  Directives that will be skipped and shown to the user. */
+	unsupported: OpenSshUnsupportedDirective[],
+};
+
+/**  The result of importing a preview into an empty inventory. */
+export type OpenSshImportResult = {
+	/**  Hosts created from the preview. */
+	hosts: HostDetails[],
+	/**  Literal aliases excluded from import, with a visible reason. */
+	skippedHosts: OpenSshSkippedHost[],
+	/**  Unsupported directives retained for the report. */
+	unsupported: OpenSshUnsupportedDirective[],
+};
+
+/**  Why a literal `Host` alias cannot be imported without changing its meaning. */
+export type OpenSshSkipReason = 
+/**  A directive within this host block has no tier-0 representation. */
+{ kind: "unsupportedDirective"; 
+/**  The directive name as written. */
+directive: string } | 
+/**  A global rule could change any host in the source file. */
+{ kind: "globalRules"; 
+/**  The global directive responsible for the exclusion. */
+directive: string } | 
+/**  Multiple `Host` blocks name the same alias. */
+{ kind: "duplicateAlias" } | 
+/**  A supported directive has a value outside the simple import subset. */
+{ kind: "invalidValue"; 
+/**  The directive name as written. */
+directive: string };
+
+/**  A literal alias excluded from the tier-0 import preview. */
+export type OpenSshSkippedHost = {
+	/**  The `Host` alias. */
+	alias: string,
+	/**  One-based line of its `Host` block. */
+	line: number,
+	/**  Why importing it would be misleading. */
+	reason: OpenSshSkipReason,
+};
+
+/**  A directive the limited tier-0 importer cannot represent yet. */
+export type OpenSshUnsupportedDirective = {
+	/**  One-based source line. */
+	line: number,
+	/**  The directive name as written. */
+	directive: string,
 };
 
 /**  The desktop platform the application runs on. */

@@ -157,6 +157,52 @@ fn create_batch_rolls_back_when_a_later_object_is_invalid() {
 }
 
 #[test]
+fn create_and_promotion_roll_back_together_when_a_promotion_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("local.db"), &key(1)).unwrap();
+    let host_id = scoplen_model::new_uuid_v7().unwrap();
+    let missing_id = scoplen_model::new_uuid_v7().unwrap();
+    let result = store.create_batch_with_implicit_and_promotions(
+        vec![NewObject {
+            id: host_id,
+            object_type: ObjectType::HOST,
+            fields: vec![
+                (FieldPath::Field(1), Value::Text("one".into())),
+                (FieldPath::Field(2), Value::Text("one.example".into())),
+            ],
+        }],
+        vec![(ObjectType::HOST, host_id)],
+        vec![(ObjectType::CREDENTIAL, missing_id)],
+    );
+    assert!(matches!(result, Err(StoreError::NotFound(id)) if id == missing_id));
+    assert!(store.get(host_id).unwrap().is_none());
+    assert!(!store.is_implicit(host_id).unwrap());
+}
+
+#[test]
+fn initial_inventory_batch_refuses_a_second_host_transactionally() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("local.db"), &key(1)).unwrap();
+    store.write(host("existing", "existing.example")).unwrap();
+    let new_id = scoplen_model::new_uuid_v7().unwrap();
+    let result = store.create_initial_inventory_batch(
+        vec![NewObject {
+            id: new_id,
+            object_type: ObjectType::HOST,
+            fields: vec![
+                (FieldPath::Field(1), Value::Text("new".into())),
+                (FieldPath::Field(2), Value::Text("new.example".into())),
+            ],
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(matches!(result, Err(StoreError::InventoryNotEmpty)));
+    assert!(store.get(new_id).unwrap().is_none());
+    assert_eq!(store.list(ObjectType::HOST).unwrap().len(), 1);
+}
+
+#[test]
 fn changing_a_missing_object_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("local.db"), &key(1)).unwrap();

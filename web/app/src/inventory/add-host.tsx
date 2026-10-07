@@ -64,6 +64,10 @@ export function AddHostDialog({
         return { field: "password", message: t("add.error.emptyPassword") };
       case "keyNotFound":
         return { field: "key", message: t("add.error.keyNotFound") };
+      case "keyTooLarge":
+        return { field: "key", message: t("add.error.keyTooLarge") };
+      case "keyReuseLimit":
+        return { field: "form", message: t("add.error.keyReuseLimit") };
       case "notAPrivateKey":
         return { field: "key", message: t("add.error.notAPrivateKey") };
       case "publicKey":
