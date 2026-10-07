@@ -7,7 +7,9 @@
 import type {
   Areas,
   CredentialLabel,
+  EditHost,
   GroupSummary,
+  GroupInput,
   HostDetails,
   HostSource,
   Id,
@@ -171,13 +173,24 @@ export function sampleHosts(): HostDetails[] {
 
 const ok = <T>(data: T): Outcome<T, never> => ({ status: "ok", data });
 const wait = <T>(value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), 120));
+const MAX_TEXT_BYTES = 16 * 1024;
+
+function textBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
 
 /** An in-memory inventory for the gallery. */
 export function sampleInventory(initial: HostDetails[], options: { failHosts?: boolean } = {}): InventoryApi {
   let hosts = initial.map((h) => ({ ...h }));
+  let availableGroups = groups.map((group) => ({ ...group }));
   const deleted = new Map<string, HostDetails>();
   const listeners = new Set<() => void>();
   const changed = () => listeners.forEach((l) => l());
+  const groupSummaries = () =>
+    availableGroups.map((group) => ({
+      ...group,
+      hostCount: hosts.filter((host) => host.groups.includes(group.id)).length,
+    }));
 
   const matches = (h: HostDetails, query: string) => {
     if (!query) return true;
@@ -203,7 +216,7 @@ export function sampleInventory(initial: HostDetails[], options: { failHosts?: b
           routes: true,
         }),
       ),
-    groups: () => wait(ok(hosts.length > 0 ? groups : [])),
+    groups: () => wait(ok(hosts.length > 0 ? groupSummaries() : [])),
     hosts: (source, query) =>
       options.failHosts
         ? wait({
@@ -247,6 +260,71 @@ export function sampleInventory(initial: HostDetails[], options: { failHosts?: b
       hosts = [...hosts, created];
       changed();
       return wait(ok(created));
+    },
+    updateHost: (id: string, input: EditHost) => {
+      const current = hosts.find((h) => h.id === id);
+      if (!current)
+        return wait({ status: "error" as const, error: { kind: "failed" as const, reference: "host not found" } });
+      if (!input.name.trim()) return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (!input.address.trim() || /\s/.test(input.address)) {
+        return wait({ status: "error" as const, error: { kind: "invalidAddress" as const } });
+      }
+      if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
+        return wait({ status: "error" as const, error: { kind: "invalidPort" as const } });
+      }
+      if (input.notes && textBytes(input.notes) > MAX_TEXT_BYTES) {
+        return wait({ status: "error" as const, error: { kind: "notesTooLong" as const } });
+      }
+      if (
+        Object.entries(input.tags).some(
+          ([key, value]) => !key.trim() || textBytes(key) > MAX_TEXT_BYTES || textBytes(value) > MAX_TEXT_BYTES,
+        )
+      ) {
+        return wait({ status: "error" as const, error: { kind: "invalidTag" as const } });
+      }
+      const requestedGroups = [...new Set(input.groups)];
+      if (requestedGroups.some((groupId) => !availableGroups.some((group) => group.id === groupId))) {
+        return wait({ status: "error" as const, error: { kind: "groupNotFound" as const } });
+      }
+      const updated = {
+        ...current,
+        ...input,
+        notes: input.notes?.trim() || null,
+        groups: requestedGroups,
+        tags: { ...input.tags },
+      };
+      hosts = hosts.map((host) => (host.id === id ? updated : host));
+      changed();
+      return wait(ok(updated));
+    },
+    createGroup: (input: GroupInput) => {
+      if (!input.name.trim()) return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (input.parent && !availableGroups.some((group) => group.id === input.parent)) {
+        return wait({ status: "error" as const, error: { kind: "parentNotFound" as const } });
+      }
+      const created = { id: `g-${Date.now()}`, name: input.name.trim(), parent: input.parent, hostCount: 0 };
+      availableGroups = [...availableGroups, created];
+      changed();
+      return wait(ok(created));
+    },
+    updateGroup: (id: string, input: GroupInput) => {
+      const current = availableGroups.find((group) => group.id === id);
+      if (!current)
+        return wait({ status: "error" as const, error: { kind: "failed" as const, reference: "group not found" } });
+      if (!input.name.trim()) return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (input.parent === id) return wait({ status: "error" as const, error: { kind: "selfParent" as const } });
+      if (input.parent && !availableGroups.some((group) => group.id === input.parent)) {
+        return wait({ status: "error" as const, error: { kind: "parentNotFound" as const } });
+      }
+      const updated = {
+        ...current,
+        name: input.name.trim(),
+        parent: input.parent,
+        hostCount: hosts.filter((host) => host.groups.includes(id)).length,
+      };
+      availableGroups = availableGroups.map((group) => (group.id === id ? updated : group));
+      changed();
+      return wait(ok(updated));
     },
     setFavorite: (id, favorite) => {
       hosts = hosts.map((h) => (h.id === id ? { ...h, favorite } : h));

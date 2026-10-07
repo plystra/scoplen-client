@@ -72,6 +72,32 @@ export interface GroupSummary {
   hostCount: number;
 }
 
+export interface EditHost {
+  name: string;
+  address: string;
+  port: number;
+  notes: string | null;
+  tags: Record<string, string>;
+  groups: Id[];
+}
+
+export type EditHostError =
+  | { kind: "emptyName" }
+  | { kind: "invalidAddress" }
+  | { kind: "invalidPort" }
+  | { kind: "notesTooLong" }
+  | { kind: "invalidTag" }
+  | { kind: "groupNotFound" }
+  | { kind: "failed"; reference: string };
+
+export interface GroupInput {
+  name: string;
+  parent: Id | null;
+}
+
+export type GroupError =
+  { kind: "emptyName" } | { kind: "parentNotFound" } | { kind: "selfParent" } | { kind: "failed"; reference: string };
+
 /**
  * Which parts of the inventory the user has reached (`01-product-definition.md`
  * §7.6). A part not reached is not shown in the sidebar.
@@ -138,6 +164,9 @@ export interface InventoryApi {
   hosts(source: HostSource, query: string): Promise<Outcome<HostSummary[], Failure>>;
   host(id: Id): Promise<Outcome<HostDetails | null, Failure>>;
   addHost(host: NewHost): Promise<Outcome<HostDetails, AddHostError>>;
+  updateHost(id: Id, host: EditHost): Promise<Outcome<HostDetails, EditHostError>>;
+  createGroup(group: GroupInput): Promise<Outcome<GroupSummary, GroupError>>;
+  updateGroup(id: Id, group: GroupInput): Promise<Outcome<GroupSummary, GroupError>>;
   setFavorite(id: Id, favorite: boolean): Promise<Outcome<null, Failure>>;
   /** Deletes the host and its logins, and keys only it used that were never named. */
   deleteHost(id: Id): Promise<Outcome<Deletion, Failure>>;

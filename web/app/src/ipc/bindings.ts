@@ -29,6 +29,12 @@ export const commands = {
 	inventoryAddHost: (host: NewHost) => typedError<HostDetails, AddHostError>(__TAURI_INVOKE("inventory_add_host", { host })),
 	/**  Changes a host's favorite marker. */
 	inventorySetFavorite: (id: string, favorite: boolean) => typedError<null, Failure>(__TAURI_INVOKE("inventory_set_favorite", { id, favorite })),
+	/**  Updates host metadata, tags, and group memberships in one core operation. */
+	inventoryUpdateHost: (id: string, host: EditHost) => typedError<HostDetails, EditHostError>(__TAURI_INVOKE("inventory_update_host", { id, host })),
+	/**  Creates a host group. */
+	inventoryCreateGroup: (group: GroupInput) => typedError<GroupSummary, GroupError>(__TAURI_INVOKE("inventory_create_group", { group })),
+	/**  Updates a host group name and parent. */
+	inventoryUpdateGroup: (id: string, group: GroupInput) => typedError<GroupSummary, GroupError>(__TAURI_INVOKE("inventory_update_group", { id, group })),
 	/**  Tombstones a host and returns a short-lived undo token. */
 	inventoryDeleteHost: (id: string) => typedError<Deletion, Failure>(__TAURI_INVOKE("inventory_delete_host", { id })),
 	/**  Restores a deletion made by this running desktop process. */
@@ -141,12 +147,68 @@ export type Deletion = {
 	token: string,
 };
 
+/**  The editable host metadata owned by the local inventory. */
+export type EditHost = {
+	/**  Display name; it must not be empty. */
+	name: string,
+	/**  DNS name or IP literal. */
+	address: string,
+	/**  SSH port, validated before the object is written. */
+	port: number,
+	/**  Plain-text notes, or `null` to clear them. */
+	notes: string | null,
+	/**  Complete replacement for the tag map. */
+	tags: { [key in string]: string },
+	/**  Complete replacement for host-group membership. */
+	groups: string[],
+};
+
+/**  Why editing host metadata failed. The host is unchanged for every variant. */
+export type EditHostError = 
+/**  The display name is empty. */
+{ kind: "emptyName" } | 
+/**  The address is empty or contains whitespace. */
+{ kind: "invalidAddress" } | 
+/**  The port is outside the TCP range. */
+{ kind: "invalidPort" } | 
+/**  Notes exceed the object-model text limit. */
+{ kind: "notesTooLong" } | 
+/**  A tag key or value is empty or exceeds the object-model text limit. */
+{ kind: "invalidTag" } | 
+/**  A requested group does not exist. */
+{ kind: "groupNotFound" } | 
+/**  The local store or model failed without changing the host. */
+{ kind: "failed"; 
+/**  A diagnostic reference safe to show for retryable failures. */
+reference: string };
+
 /**  A failure that can be retried by the interface. */
 export type Failure = 
 /**  The local store or model failed without changing the requested data. */
 { kind: "failed"; 
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
+
+/**  Why creating or editing a group failed. No group is changed for failures. */
+export type GroupError = 
+/**  The display name is empty. */
+{ kind: "emptyName" } | 
+/**  A requested parent group does not exist. */
+{ kind: "parentNotFound" } | 
+/**  A group cannot be its own parent. */
+{ kind: "selfParent" } | 
+/**  The local store or model failed without changing the group. */
+{ kind: "failed"; 
+/**  A diagnostic reference safe to show for retryable failures. */
+reference: string };
+
+/**  Input for creating or editing a host group. */
+export type GroupInput = {
+	/**  Display name; it must not be empty. */
+	name: string,
+	/**  Optional parent group. */
+	parent: string | null,
+};
 
 /**  A host group in the sidebar. */
 export type GroupSummary = {
