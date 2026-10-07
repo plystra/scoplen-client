@@ -67,6 +67,29 @@ pub struct StoreChanged {
     pub ids: Vec<String>,
 }
 
+/// Why a device-local session view should reload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionChangeKind {
+    /// A connection owner recorded that a transport opened.
+    Opened,
+    /// A connection owner recorded a terminal outcome.
+    Closed,
+    /// The user removed an ended session from local history.
+    Forgotten,
+}
+
+/// A device-local session lifecycle event; session history is not a replicated
+/// object and therefore has its own event instead of `StoreChanged`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type, tauri_specta::Event)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionChanged {
+    /// The session identifier.
+    pub session_id: String,
+    /// The lifecycle transition.
+    pub change: SessionChangeKind,
+}
+
 impl From<&Change> for StoreChanged {
     fn from(change: &Change) -> Self {
         StoreChanged {
@@ -91,5 +114,14 @@ mod tests {
         assert_eq!(RecordType::from(ObjectType::from_wire(77).unwrap()), RecordType::Unknown);
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["recordType"], "host");
+    }
+
+    #[test]
+    fn session_changes_are_typed_and_redacted() {
+        let event =
+            SessionChanged { session_id: "session-1".into(), change: SessionChangeKind::Closed };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["sessionId"], "session-1");
+        assert_eq!(json["change"], "closed");
     }
 }

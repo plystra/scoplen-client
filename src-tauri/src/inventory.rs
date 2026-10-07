@@ -4,14 +4,16 @@
 //! `scoplen-client-core`; this module only supplies process state and IPC
 //! adapters.
 
+use crate::events::{SessionChangeKind, SessionChanged};
 use crate::local_data::LocalDataState;
 use scoplen_client_core::inventory::{
     AccessProfileInput, AccessProfileSummary, AddHostError, Areas, CredentialInput,
     CredentialSummary, Deletion, DeletionStore, EditHost, EditHostError, Failure, GroupError,
     GroupInput, GroupSummary, HostDetails, HostSource, HostSummary, Inventory, NewHost,
     ObjectEditError, OpenSshImportError, OpenSshImportPreview, OpenSshImportResult, RecentSession,
-    RouteInput, RouteSummary,
+    RecentSessionKind, RecentSessionOutcome, RouteInput, RouteSummary, SessionError,
 };
+use tauri_specta::Event as _;
 
 /// Process-local undo state shared by inventory command calls.
 #[derive(Clone, Default)]
@@ -46,6 +48,17 @@ where
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(|error| AddHostError::Failed { reference: error.to_string() })?
+}
+
+async fn blocking_session<T>(
+    operation: impl FnOnce() -> Result<T, SessionError> + Send + 'static,
+) -> Result<T, SessionError>
+where
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| SessionError::Failed { reference: error.to_string() })?
 }
 
 /// Returns which inventory areas have content.
@@ -92,6 +105,85 @@ pub async fn inventory_recent_sessions(
 ) -> Result<Vec<RecentSession>, Failure> {
     let inventory = facade(&local, &state)?;
     blocking(move || inventory.recent_sessions()).await
+}
+
+/// Records that a real connection owner opened a device-local session.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_open(
+    app: tauri::AppHandle,
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    profile_id: String,
+    kind: RecentSessionKind,
+) -> Result<RecentSession, SessionError> {
+    let inventory = facade_session(&local, &state)?;
+    let opened = blocking_session(move || inventory.open_session(profile_id, kind)).await?;
+    let _ = SessionChanged { session_id: opened.id.clone(), change: SessionChangeKind::Opened }
+        .emit(&app);
+    Ok(opened)
+}
+
+/// Records the outcome reported by a real connection owner.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_close(
+    app: tauri::AppHandle,
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    session_id: String,
+    outcome: RecentSessionOutcome,
+) -> Result<(), SessionError> {
+    let inventory = facade_session(&local, &state)?;
+    let event_session_id = session_id.clone();
+    blocking_session(move || inventory.close_session(session_id, outcome)).await?;
+    let _ = SessionChanged { session_id: event_session_id, change: SessionChangeKind::Closed }
+        .emit(&app);
+    Ok(())
+}
+
+/// Requests a reconnect through the connection engine.
+///
+/// The engine is not part of this client build yet, so the core returns an
+/// explicit boundary error and does not create a new session or claim success.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_reconnect(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    session_id: String,
+) -> Result<(), SessionError> {
+    let inventory = facade_session(&local, &state)?;
+    blocking_session(move || inventory.reconnect_session(session_id)).await
+}
+
+/// Forgets one ended session and its saved local scrollback.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_forget(
+    app: tauri::AppHandle,
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    session_id: String,
+) -> Result<(), SessionError> {
+    let inventory = facade_session(&local, &state)?;
+    blocking_session({
+        let session_id = session_id.clone();
+        move || inventory.forget_session(session_id)
+    })
+    .await?;
+    let _ = SessionChanged { session_id, change: SessionChangeKind::Forgotten }.emit(&app);
+    Ok(())
+}
+
+fn facade_session(
+    local: &LocalDataState,
+    state: &InventoryState,
+) -> Result<Inventory, SessionError> {
+    let store = local
+        .store()
+        .ok_or_else(|| SessionError::Failed { reference: "local data is locked".into() })?;
+    Ok(Inventory::with_deletions(store, state.deletions.clone()))
 }
 
 /// Reads one host and its logins.

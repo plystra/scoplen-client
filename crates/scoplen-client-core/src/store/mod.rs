@@ -52,6 +52,9 @@ pub enum StoreError {
     /// The object to change does not exist.
     #[error("object {0} does not exist")]
     NotFound(Uuid),
+    /// A device-local session is still open and cannot be forgotten.
+    #[error("session {0} is still active")]
+    SessionActive(Uuid),
     /// A create operation supplied an identifier already in the store.
     #[error("object {0} already exists")]
     AlreadyExists(Uuid),

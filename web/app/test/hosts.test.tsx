@@ -71,6 +71,8 @@ describe("the host list", () => {
     expect(screen.getByRole("list", { name: "Recent sessions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /prod-api-01.*Terminal/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /prod-db-01.*Files/i })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect prod-api-01" }));
+    expect(await screen.findByText("Reconnect is not available yet; no connection was opened.")).toBeTruthy();
 
     unmount();
     show(sampleInventory(sampleHosts(), { failRecentSessions: true }));

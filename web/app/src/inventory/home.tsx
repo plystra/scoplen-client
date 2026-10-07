@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Button, Confirm, Dialog, IconButton, Notice, ScopeMark, SearchField, Tag } from "@scoplen/ui";
-import { Plus, Star } from "lucide-react";
+import { Plus, RotateCcw, Star } from "lucide-react";
 import { useRef, useState, type KeyboardEvent } from "react";
 import { useI18n } from "../i18n";
 import { AddHostDialog } from "./add-host";
@@ -68,6 +68,19 @@ export function HostsHome({ onOpenObjects }: { onOpenObjects?: (section: ObjectS
       setToast({
         message: `${t("failed.body")} ${t("startup.error.reference", { reference: outcome.error.reference })}`,
       });
+    }
+  };
+
+  const reconnect = async (sessionId: Id) => {
+    const outcome = await api.reconnectSession(sessionId);
+    if (outcome.status === "error") {
+      const message =
+        outcome.error.kind === "transportUnavailable"
+          ? t("hosts.recentSessions.reconnectUnavailable")
+          : outcome.error.kind === "failed"
+            ? `${t("failed.body")} ${t("startup.error.reference", { reference: outcome.error.reference })}`
+            : t("hosts.recentSessions.reconnectFailed");
+      setToast({ message });
     }
   };
 
@@ -180,7 +193,9 @@ export function HostsHome({ onOpenObjects }: { onOpenObjects?: (section: ObjectS
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6">
-          {source.kind === "recent" ? <RecentSessionSection sessions={recentSessions} onSelect={setSelected} /> : null}
+          {source.kind === "recent" ? (
+            <RecentSessionSection sessions={recentSessions} onSelect={setSelected} onReconnect={reconnect} />
+          ) : null}
           {hosts.state === "loading" ? (
             <p className="sr-only" role="status">
               {t("hosts.loading")}
@@ -420,9 +435,11 @@ function Empty({ children }: { children: React.ReactNode }) {
 function RecentSessionSection({
   sessions,
   onSelect,
+  onReconnect,
 }: {
   sessions: Loaded<RecentSession[]>;
   onSelect: (id: Id) => void;
+  onReconnect: (id: Id) => void;
 }) {
   const { t } = useI18n();
   if (sessions.state === "loading") {
@@ -449,7 +466,7 @@ function RecentSessionSection({
       ) : (
         <ul aria-label={t("hosts.recentSessions")} className="m-0 flex list-none flex-col p-0">
           {sessions.data.map((session) => (
-            <RecentSessionRow key={session.id} session={session} onSelect={onSelect} />
+            <RecentSessionRow key={session.id} session={session} onSelect={onSelect} onReconnect={onReconnect} />
           ))}
         </ul>
       )}
@@ -457,17 +474,25 @@ function RecentSessionSection({
   );
 }
 
-function RecentSessionRow({ session, onSelect }: { session: RecentSession; onSelect: (id: Id) => void }) {
+function RecentSessionRow({
+  session,
+  onSelect,
+  onReconnect,
+}: {
+  session: RecentSession;
+  onSelect: (id: Id) => void;
+  onReconnect: (id: Id) => void;
+}) {
   const { t } = useI18n();
   const status = session.outcome === null ? "open" : session.outcome;
   const date = new Date(Number(session.startedAt));
   const formatted = Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
   return (
-    <li>
+    <li className="group flex items-center rounded-md hover:bg-inset/60">
       <button
         type="button"
         onClick={() => onSelect(session.hostId)}
-        className="flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left hover:bg-inset/60 focus-visible:outline-offset-0"
+        className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-md px-3 py-2 text-left focus-visible:outline-offset-0"
       >
         <span className="flex min-w-0 items-center justify-between gap-3">
           <span className="truncate text-sm font-medium text-foreground">{session.hostName}</span>
@@ -491,6 +516,15 @@ function RecentSessionRow({ session, onSelect }: { session: RecentSession; onSel
           </time>
         ) : null}
       </button>
+      {session.outcome !== null ? (
+        <IconButton
+          label={t("hosts.recentSessions.reconnect", { name: session.hostName })}
+          onClick={() => onReconnect(session.id)}
+          className="mr-1 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
+        >
+          <RotateCcw aria-hidden="true" className="size-4" />
+        </IconButton>
+      ) : null}
     </li>
   );
 }

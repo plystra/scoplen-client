@@ -20,6 +20,19 @@ export const commands = {
 	inventoryHosts: (source: HostSource, query: string) => typedError<HostSummary[], Failure>(__TAURI_INVOKE("inventory_hosts", { source, query })),
 	/**  Lists the newest live entries in the device-local Recent session history. */
 	inventoryRecentSessions: () => typedError<RecentSession[], Failure>(__TAURI_INVOKE("inventory_recent_sessions")),
+	/**  Records that a real connection owner opened a device-local session. */
+	sessionOpen: (profileId: string, kind: RecentSessionKind) => typedError<RecentSession, SessionError>(__TAURI_INVOKE("session_open", { profileId, kind })),
+	/**  Records the outcome reported by a real connection owner. */
+	sessionClose: (sessionId: string, outcome: RecentSessionOutcome) => typedError<null, SessionError>(__TAURI_INVOKE("session_close", { sessionId, outcome })),
+	/**
+	 *  Requests a reconnect through the connection engine.
+	 *
+	 *  The engine is not part of this client build yet, so the core returns an
+	 *  explicit boundary error and does not create a new session or claim success.
+	 */
+	sessionReconnect: (sessionId: string) => typedError<null, SessionError>(__TAURI_INVOKE("session_reconnect", { sessionId })),
+	/**  Forgets one ended session and its saved local scrollback. */
+	sessionForget: (sessionId: string) => typedError<null, SessionError>(__TAURI_INVOKE("session_forget", { sessionId })),
 	/**  Reads one host and its logins. */
 	inventoryHost: (id: string) => typedError<({
 	/**  Plain-text notes. */
@@ -99,6 +112,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+	sessionChanged: makeEvent<SessionChanged>("session-changed"),
 	storeChanged: makeEvent<StoreChanged>("store-changed"),
 };
 
@@ -160,29 +174,29 @@ export type AccessProfileSummary = {
 };
 
 /**  Why adding a host failed. Nothing is saved for any variant. */
-export type AddHostError = 
+export type AddHostError =
 /**  The address is empty or contains whitespace. */
-{ kind: "invalidAddress" } | 
+{ kind: "invalidAddress" } |
 /**  The port is outside the TCP range. */
-{ kind: "invalidPort" } | 
+{ kind: "invalidPort" } |
 /**  The username is empty. */
-{ kind: "emptyUsername" } | 
+{ kind: "emptyUsername" } |
 /**  The password is empty. */
-{ kind: "emptyPassword" } | 
+{ kind: "emptyPassword" } |
 /**  The selected key file does not exist or could not be read. */
-{ kind: "keyNotFound" } | 
+{ kind: "keyNotFound" } |
 /**  The selected key file exceeds the bounded local import size. */
-{ kind: "keyTooLarge" } | 
+{ kind: "keyTooLarge" } |
 /**  Reusing a private key would require scanning beyond the bounded local limit. */
-{ kind: "keyReuseLimit" } | 
+{ kind: "keyReuseLimit" } |
 /**  The input is not a private key. */
-{ kind: "notAPrivateKey" } | 
+{ kind: "notAPrivateKey" } |
 /**  Public key text was supplied where private key text is needed. */
-{ kind: "publicKey" } | 
+{ kind: "publicKey" } |
 /**  A PuTTY key is not accepted by the OpenSSH key reader. */
-{ kind: "puttyKey" } | 
+{ kind: "puttyKey" } |
 /**  A disk or model operation failed. */
-{ kind: "failed"; 
+{ kind: "failed";
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
 
@@ -211,17 +225,17 @@ export type Areas = {
 };
 
 /**  Where a credential resolves its authentication material. */
-export type CredentialBindingInput = 
+export type CredentialBindingInput =
 /**  Material is encrypted in the replicated object. */
-"shared" | 
+"shared" |
 /**  Material is held by each device separately. */
-"device" | 
+"device" |
 /**  Material is resolved at connect time. */
 "none";
 
 /**
  *  Input for creating or replacing a credential description.
- * 
+ *
  *  `secret` is accepted only for shared password/private-key credentials;
  *  `device_secret` is accepted only for device-bound password/private-key
  *  credentials. Both are consumed by the core and are not retained in any
@@ -254,24 +268,24 @@ export type CredentialInput = {
 
 /**
  *  The kind of credential exposed by the independent object editor.
- * 
+ *
  *  The wire names intentionally follow the object model while keeping the
  *  private key kind readable in the interface (the host details read model
  *  calls it `key`).
  */
-export type CredentialKindInput = 
+export type CredentialKindInput =
 /**  A password stored in the encrypted shared object. */
-"password" | 
+"password" |
 /**  An OpenSSH private key. */
-"key" | 
+"key" |
 /**  An organization-issued certificate. */
-"certificate" | 
+"certificate" |
 /**  A system SSH agent. */
-"agent" | 
+"agent" |
 /**  A hardware security key. */
-"securityKey" | 
+"securityKey" |
 /**  A non-exportable device key. */
-"deviceKey" | 
+"deviceKey" |
 /**  An external credential provider. */
 "external";
 
@@ -292,19 +306,19 @@ export type CredentialLabel = {
 };
 
 /**  Credential kinds understood by the inventory interface. */
-export type CredentialLabelKind = 
+export type CredentialLabelKind =
 /**  A password. */
-"password" | 
+"password" |
 /**  A private key. */
-"key" | 
+"key" |
 /**  A system SSH agent. */
-"agent" | 
+"agent" |
 /**  A hardware security key. */
-"securityKey" | 
+"securityKey" |
 /**  A non-exportable device key. */
-"deviceKey" | 
+"deviceKey" |
 /**  An external provider. */
-"external" | 
+"external" |
 /**  A short-lived certificate. */
 "certificate";
 
@@ -362,41 +376,41 @@ export type EditHost = {
 };
 
 /**  Why editing host metadata failed. The host is unchanged for every variant. */
-export type EditHostError = 
+export type EditHostError =
 /**  The display name is empty. */
-{ kind: "emptyName" } | 
+{ kind: "emptyName" } |
 /**  The address is empty or contains whitespace. */
-{ kind: "invalidAddress" } | 
+{ kind: "invalidAddress" } |
 /**  The port is outside the TCP range. */
-{ kind: "invalidPort" } | 
+{ kind: "invalidPort" } |
 /**  Notes exceed the object-model text limit. */
-{ kind: "notesTooLong" } | 
+{ kind: "notesTooLong" } |
 /**  A tag key or value is empty or exceeds the object-model text limit. */
-{ kind: "invalidTag" } | 
+{ kind: "invalidTag" } |
 /**  A requested group does not exist. */
-{ kind: "groupNotFound" } | 
+{ kind: "groupNotFound" } |
 /**  The local store or model failed without changing the host. */
-{ kind: "failed"; 
+{ kind: "failed";
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
 
 /**  A failure that can be retried by the interface. */
-export type Failure = 
+export type Failure =
 /**  The local store or model failed without changing the requested data. */
-{ kind: "failed"; 
+{ kind: "failed";
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
 
 /**  Why creating or editing a group failed. No group is changed for failures. */
-export type GroupError = 
+export type GroupError =
 /**  The display name is empty. */
-{ kind: "emptyName" } | 
+{ kind: "emptyName" } |
 /**  A requested parent group does not exist. */
-{ kind: "parentNotFound" } | 
+{ kind: "parentNotFound" } |
 /**  A group cannot be its own parent. */
-{ kind: "selfParent" } | 
+{ kind: "selfParent" } |
 /**  The local store or model failed without changing the group. */
-{ kind: "failed"; 
+{ kind: "failed";
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
 
@@ -429,15 +443,15 @@ export type HostDetails = {
 } & HostSummary;
 
 /**  Which hosts to list. */
-export type HostSource = 
+export type HostSource =
 /**  Every live host. */
-{ kind: "all" } | 
+{ kind: "all" } |
 /**  Hosts marked as favorites. */
-{ kind: "favorites" } | 
+{ kind: "favorites" } |
 /**  Hosts referenced by recent sessions. */
-{ kind: "recent" } | 
+{ kind: "recent" } |
 /**  Hosts in one group. */
-{ kind: "group"; 
+{ kind: "group";
 /**  The group identifier. */
 id: string };
 
@@ -468,31 +482,31 @@ export type HostSummary = {
 };
 
 /**  A failure of an operation on the local data, as shown to the user. */
-export type LocalDataError = 
+export type LocalDataError =
 /**  The passphrase is not correct. Nothing changed. */
-{ kind: "wrongPassphrase" } | 
+{ kind: "wrongPassphrase" } |
 /**  The passphrase is empty. Nothing changed. */
-{ kind: "emptyPassphrase" } | 
+{ kind: "emptyPassphrase" } |
 /**  The passphrase cannot be removed without a keystore. Nothing changed. */
-{ kind: "passphraseRequired" } | 
+{ kind: "passphraseRequired" } |
 /**
  *  The operation needs the store to be in another state, for example
  *  unlocked. Nothing changed.
  */
-{ kind: "invalidState" } | 
+{ kind: "invalidState" } |
 /**  The platform or the disk failed. Nothing changed. */
-{ kind: "failed"; 
+{ kind: "failed";
 /**  A diagnostic reference for support, free of secrets. */
 reference: string };
 
 /**
  *  A language the interface is written in (`11-client-architecture.md` §4).
- * 
+ *
  *  English is the source language; every other language is written from it.
  */
-export type Locale = 
+export type Locale =
 /**  English, the source language. */
-"en" | 
+"en" |
 /**  Simplified Chinese. */
 "zh-Hans";
 
@@ -530,37 +544,37 @@ export type NewHost = {
  *  Why an independent object edit failed. No operation writes anything for a
  *  validation error, and references are checked before a write begins.
  */
-export type ObjectEditError = 
+export type ObjectEditError =
 /**  One of the supplied identifiers is not a UUID. */
-{ kind: "invalidId"; field: string } | 
+{ kind: "invalidId"; field: string } |
 /**  A referenced or edited object does not exist. */
-{ kind: "notFound"; entity: string } | 
+{ kind: "notFound"; entity: string } |
 /**  A required name is empty. */
-{ kind: "emptyName" } | 
+{ kind: "emptyName" } |
 /**  A required username is empty. */
-{ kind: "emptyUsername" } | 
+{ kind: "emptyUsername" } |
 /**  A text field exceeds the object-model limit. */
-{ kind: "textTooLong"; field: string } | 
+{ kind: "textTooLong"; field: string } |
 /**  A profile references a credential of the wrong type or a missing one. */
-{ kind: "invalidCredential" } | 
+{ kind: "invalidCredential" } |
 /**  A profile or route references a missing route/profile/host. */
-{ kind: "invalidRoute" } | 
+{ kind: "invalidRoute" } |
 /**  A proxy is not a valid host:port endpoint. */
-{ kind: "invalidProxy" } | 
+{ kind: "invalidProxy" } |
 /**  A route command is empty or exceeds the model limit. */
-{ kind: "invalidCommand" } | 
+{ kind: "invalidCommand" } |
 /**  Kind and binding do not satisfy the object model. */
-{ kind: "invalidCredentialBinding" } | 
+{ kind: "invalidCredentialBinding" } |
 /**  Shared password/private-key credentials require material on creation. */
-{ kind: "secretRequired" } | 
+{ kind: "secretRequired" } |
 /**  A secret was supplied to a binding that must never store one. */
-{ kind: "secretNotAllowed" } | 
+{ kind: "secretNotAllowed" } |
 /**  A route or credential is still referenced by another object. */
-{ kind: "inUse" } | 
+{ kind: "inUse" } |
 /**  A default profile cannot be deleted until another profile is selected. */
-{ kind: "defaultProfile" } | 
+{ kind: "defaultProfile" } |
 /**  Managed routes are organization-authored and unavailable locally. */
-{ kind: "managedRoute" } | 
+{ kind: "managedRoute" } |
 /**  The local store or model failed without changing the requested object. */
 { kind: "failed"; reference: string };
 
@@ -582,25 +596,25 @@ export type OpenSshImportEntry = {
 };
 
 /**  Why the empty-list OpenSSH import could not proceed. */
-export type OpenSshImportError = 
+export type OpenSshImportError =
 /**  The selected file could not be read. */
-{ kind: "fileNotFound" } | 
+{ kind: "fileNotFound" } |
 /**  The source was not valid UTF-8. */
-{ kind: "notText" } | 
+{ kind: "notText" } |
 /**  The config or its simple-host list exceeds the bounded onboarding import. */
-{ kind: "tooLarge" } | 
+{ kind: "tooLarge" } |
 /**  No representable host block was found. */
-{ kind: "noHosts" } | 
+{ kind: "noHosts" } |
 /**  The source changed after the user reviewed its preview. */
-{ kind: "sourceChanged" } | 
+{ kind: "sourceChanged" } |
 /**  Import is intentionally limited to the first-launch empty inventory. */
-{ kind: "inventoryNotEmpty" } | 
+{ kind: "inventoryNotEmpty" } |
 /**  An identity file named by a representable entry could not be read. */
-{ kind: "identityNotFound"; 
+{ kind: "identityNotFound";
 /**  The path, which is not secret. */
-path: string } | 
+path: string } |
 /**  The selected file or local store failed without a partial import. */
-{ kind: "failed"; 
+{ kind: "failed";
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
 
@@ -627,19 +641,19 @@ export type OpenSshImportResult = {
 };
 
 /**  Why a literal `Host` alias cannot be imported without changing its meaning. */
-export type OpenSshSkipReason = 
+export type OpenSshSkipReason =
 /**  A directive within this host block has no tier-0 representation. */
-{ kind: "unsupportedDirective"; 
+{ kind: "unsupportedDirective";
 /**  The directive name as written. */
-directive: string } | 
+directive: string } |
 /**  A global rule could change any host in the source file. */
-{ kind: "globalRules"; 
+{ kind: "globalRules";
 /**  The global directive responsible for the exclusion. */
-directive: string } | 
+directive: string } |
 /**  Multiple `Host` blocks name the same alias. */
-{ kind: "duplicateAlias" } | 
+{ kind: "duplicateAlias" } |
 /**  A supported directive has a value outside the simple import subset. */
-{ kind: "invalidValue"; 
+{ kind: "invalidValue";
 /**  The directive name as written. */
 directive: string };
 
@@ -662,20 +676,20 @@ export type OpenSshUnsupportedDirective = {
 };
 
 /**  The desktop platform the application runs on. */
-export type Platform = 
+export type Platform =
 /**  macOS. */
-"macos" | 
+"macos" |
 /**  Windows. */
-"windows" | 
+"windows" |
 /**  Any other system; Phase 1 ships only macOS and Windows builds. */
 "other";
 
 /**  How the local database key is protected. */
-export type Protection = 
+export type Protection =
 /**  The platform keystore alone. */
-"keystore" | 
+"keystore" |
 /**  The platform keystore and a local passphrase. */
-"keystoreAndPassphrase" | 
+"keystoreAndPassphrase" |
 /**  A local passphrase alone, on a platform without a keystore. */
 "passphraseOnly";
 
@@ -718,29 +732,29 @@ export type RecentSessionKind = "terminal" | "files" | "forward";
 export type RecentSessionOutcome = "closed" | "failed";
 
 /**  The type of a changed object, in the frontend's terms. */
-export type RecordType = 
+export type RecordType =
 /**  A host. */
-"host" | 
+"host" |
 /**  A login. */
-"accessProfile" | 
+"accessProfile" |
 /**  A key, password, or other credential. */
-"credential" | 
+"credential" |
 /**  A jump route or proxy. */
-"route" | 
+"route" |
 /**  A group. */
-"hostGroup" | 
+"hostGroup" |
 /**  A known host key. */
-"trustRecord" | 
+"trustRecord" |
 /**  A snippet. */
-"snippet" | 
+"snippet" |
 /**  A tunnel. */
-"forward" | 
+"forward" |
 /**  A workspace. */
-"workspace" | 
+"workspace" |
 /**  A preference. */
-"preference" | 
+"preference" |
 /**  A network reached through the bastion. */
-"gatewayNetwork" | 
+"gatewayNetwork" |
 /**  A type a newer version of Scoplen defines. */
 "unknown";
 
@@ -749,15 +763,15 @@ export type RecordType =
  *  that they can be displayed, but local editing rejects them until the
  *  organization client is available.
  */
-export type RouteDefinition = 
+export type RouteDefinition =
 /**  Ordered access profiles used as jump hosts. */
-{ kind: "jump"; hops: string[] } | 
+{ kind: "jump"; hops: string[] } |
 /**  A SOCKS5 proxy at `host:port`. */
-{ kind: "socks5"; proxy: string; credential: string | null } | 
+{ kind: "socks5"; proxy: string; credential: string | null } |
 /**  An HTTP CONNECT proxy at `host:port`. */
-{ kind: "httpConnect"; proxy: string; credential: string | null } | 
+{ kind: "httpConnect"; proxy: string; credential: string | null } |
 /**  A local OpenSSH `ProxyCommand`. */
-{ kind: "command"; command: string } | 
+{ kind: "command"; command: string } |
 /**  A managed gateway network, authored by the organization. */
 { kind: "managed"; gatewayNetwork: string };
 
@@ -770,23 +784,23 @@ export type RouteInput = {
 };
 
 /**  How a login reaches its host. */
-export type RouteLabel = 
+export type RouteLabel =
 /**  A direct SSH connection. */
-{ kind: "direct" } | 
+{ kind: "direct" } |
 /**  Through one or more jump hosts. */
-{ kind: "jump"; 
+{ kind: "jump";
 /**  The route name. */
-name: string } | 
+name: string } |
 /**  Through a SOCKS or HTTP proxy. */
-{ kind: "proxy"; 
+{ kind: "proxy";
 /**  The route name. */
-name: string } | 
+name: string } |
 /**  Through a ProxyCommand. */
-{ kind: "command"; 
+{ kind: "command";
 /**  The route name. */
-name: string } | 
+name: string } |
 /**  Through a managed gateway network. */
-{ kind: "bastion"; 
+{ kind: "bastion";
 /**  The route name. */
 name: string };
 
@@ -806,39 +820,80 @@ export type RouteSummary = {
 	restored: boolean,
 };
 
+/**  Why a device-local session view should reload. */
+export type SessionChangeKind =
+/**  A connection owner recorded that a transport opened. */
+"opened" |
+/**  A connection owner recorded a terminal outcome. */
+"closed" |
+/**  The user removed an ended session from local history. */
+"forgotten";
+
+/**
+ *  A device-local session lifecycle event; session history is not a replicated
+ *  object and therefore has its own event instead of `StoreChanged`.
+ */
+export type SessionChanged = {
+	/**  The session identifier. */
+	sessionId: string,
+	/**  The lifecycle transition. */
+	change: SessionChangeKind,
+};
+
+/**  Why a device-local session event could not be applied. */
+export type SessionError =
+/**  The profile identifier was not a UUID. */
+{ kind: "invalidProfileId" } |
+/**  The session identifier was not a UUID. */
+{ kind: "invalidSessionId" } |
+/**  The login no longer exists on this device. */
+{ kind: "profileNotFound" } |
+/**  The session no longer exists in local history. */
+{ kind: "sessionNotFound" } |
+/**  The session already has an ending outcome. */
+{ kind: "alreadyClosed" } |
+/**  A live session must report an outcome before it can be forgotten. */
+{ kind: "activeSession" } |
+/**  The connection engine has not been connected to this history service. */
+{ kind: "transportUnavailable" } |
+/**  The local store failed without exposing its internals or secrets. */
+{ kind: "failed";
+/**  A diagnostic reference safe to show for retryable failures. */
+reference: string };
+
 /**  How a new host authenticates. */
-export type SignIn = 
+export type SignIn =
 /**  Store a password in the encrypted personal object. */
-{ kind: "password"; 
+{ kind: "password";
 /**  The password to store in the encrypted local object. */
-password: string } | 
+password: string } |
 /**  Read an OpenSSH private key from a path. */
-{ kind: "keyFile"; 
+{ kind: "keyFile";
 /**  The path to an OpenSSH private key file. */
-path: string } | 
+path: string } |
 /**  Use OpenSSH private-key text supplied by the user. */
-{ kind: "keyText"; 
+{ kind: "keyText";
 /**  OpenSSH private-key text. */
-key: string } | 
+key: string } |
 /**  Generate a key (reserved for the key-generation flow). */
-{ kind: "generateKey" } | 
+{ kind: "generateKey" } |
 /**  Resolve a key from the system agent. */
 { kind: "agent" };
 
 /**  Whether the local data can be used, and if not, what is needed. */
-export type Status = 
+export type Status =
 /**  The store is open. */
-{ state: "open"; 
+{ state: "open";
 /**  How its key is protected. */
-protection: Protection } | 
+protection: Protection } |
 /**  The user must enter the local passphrase. */
-{ state: "needsPassphrase"; 
+{ state: "needsPassphrase";
 /**  How the key is protected. */
-protection: Protection } | 
+protection: Protection } |
 /**  First launch without a keystore: the user must choose a passphrase. */
-{ state: "needsNewPassphrase" } | 
+{ state: "needsNewPassphrase" } |
 /**  The store exists but cannot be opened on this device. */
-{ state: "unreadable"; 
+{ state: "unreadable";
 /**  Why. */
 reason: UnreadableReason };
 
@@ -854,11 +909,11 @@ export type StoreChanged = {
 };
 
 /**  Why the local store cannot be opened. */
-export type UnreadableReason = 
+export type UnreadableReason =
 /**  Its key is missing from the keystore. */
-"keyMissing" | 
+"keyMissing" |
 /**  The key does not decrypt it. */
-"wrongKey" | 
+"wrongKey" |
 /**  It was written by a newer version of Scoplen. */
 "newerVersion";
 
