@@ -174,6 +174,55 @@ describe("adding a host", () => {
   });
 });
 
+describe("editing a host", () => {
+  async function open() {
+    show(sampleInventory(sampleHosts()));
+    await screen.findByText("7 hosts");
+    await userEvent.click(within(list()).getByText("nas"));
+    await userEvent.click(await screen.findByRole("button", { name: "Edit host" }));
+    return screen.findByRole("dialog", { name: "Edit host" });
+  }
+
+  it("updates metadata, tags, and group membership", async () => {
+    const dialog = await open();
+    await userEvent.clear(within(dialog).getByLabelText("Name"));
+    await userEvent.type(within(dialog).getByLabelText("Name"), "home-nas");
+    await userEvent.clear(within(dialog).getByLabelText("Address"));
+    await userEvent.type(within(dialog).getByLabelText("Address"), "nas.home.example");
+    await userEvent.clear(within(dialog).getByLabelText("Port"));
+    await userEvent.type(within(dialog).getByLabelText("Port"), "2200");
+    await userEvent.type(within(dialog).getByLabelText("Notes"), " updated");
+    await userEvent.clear(within(dialog).getByLabelText("Tags"));
+    await userEvent.type(within(dialog).getByLabelText("Tags"), "env=home\nowner=mia");
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Home lab" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create group" }));
+    const groupDialog = await screen.findByRole("dialog", { name: "Create group" });
+    await userEvent.type(within(groupDialog).getByLabelText("Group name"), "Personal");
+    await userEvent.click(within(groupDialog).getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("checkbox", { name: "Personal" })).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Edit Personal" }));
+    const editGroupDialog = await screen.findByRole("dialog", { name: "Edit group" });
+    await userEvent.clear(within(editGroupDialog).getByLabelText("Group name"));
+    await userEvent.type(within(editGroupDialog).getByLabelText("Group name"), "Personal work");
+    await userEvent.click(within(editGroupDialog).getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("checkbox", { name: "Personal work" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "home-nas" })).toBeTruthy();
+    expect(screen.getByText("nas.home.example:2200")).toBeTruthy();
+    expect(screen.getAllByText("env: home").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Personal work").length).toBeGreaterThan(0);
+  });
+
+  it("keeps the form open and reports invalid metadata", async () => {
+    const dialog = await open();
+    await userEvent.clear(within(dialog).getByLabelText("Address"));
+    await userEvent.type(within(dialog).getByLabelText("Address"), "bad address");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    expect(within(dialog).getByText("Enter a DNS name or an IP address without spaces.")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Edit host" })).toBeTruthy();
+  });
+});
+
 describe("in Chinese", () => {
   it("uses the Chinese vocabulary", async () => {
     show(sampleInventory(sampleHosts()), "zh-Hans");

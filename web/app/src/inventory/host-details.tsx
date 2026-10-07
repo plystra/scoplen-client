@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-import { Button, IconButton, Tag } from "@scoplen/ui";
-import { X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { Button, Dialog, Field, IconButton, Tag, TextAreaField } from "@scoplen/ui";
+import { Pencil, Plus, X } from "lucide-react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import {
   useInventory,
   type CredentialLabel,
+  type EditHostError,
+  type GroupError,
+  type GroupInput,
   type GroupSummary,
   type HostDetails,
   type Id,
@@ -29,6 +32,7 @@ export function HostDetailsPanel({
   const { t } = useI18n();
   const api = useInventory();
   const details = useLoad(() => api.host(id), id);
+  const [editing, setEditing] = useState(false);
 
   return (
     <aside
@@ -72,6 +76,10 @@ export function HostDetailsPanel({
 
       {details.state === "ready" && details.data ? (
         <div className="border-t border-border px-5 py-3">
+          <Button variant="ghost" className="-ml-3 gap-1.5" onClick={() => setEditing(true)}>
+            <Pencil aria-hidden="true" className="size-4" />
+            {t("host.edit")}
+          </Button>
           <Button
             variant="ghost"
             className="-ml-3 text-attention hover:bg-inset"
@@ -81,8 +89,325 @@ export function HostDetailsPanel({
           </Button>
         </div>
       ) : null}
+      {details.state === "ready" && details.data ? (
+        <EditHostDialog
+          key={`${details.data.id}:${editing ? "open" : "closed"}`}
+          open={editing}
+          onOpenChange={setEditing}
+          host={details.data}
+          groups={groups}
+        />
+      ) : null}
     </aside>
   );
+}
+
+function EditHostDialog({
+  open,
+  onOpenChange,
+  host,
+  groups,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  host: HostDetails;
+  groups: GroupSummary[];
+}) {
+  const { t } = useI18n();
+  const api = useInventory();
+  const [name, setName] = useState(host.name);
+  const [address, setAddress] = useState(host.address);
+  const [port, setPort] = useState(String(host.port));
+  const [notes, setNotes] = useState(host.notes ?? "");
+  const [tags, setTags] = useState(formatTags(host.tags));
+  const [selectedGroups, setSelectedGroups] = useState<string[]>(host.groups);
+  const [availableGroups, setAvailableGroups] = useState(groups);
+  const [groupDialog, setGroupDialog] = useState<{ id?: string } | null>(null);
+  const [problem, setProblem] = useState<EditProblem | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const portNumber = Number(port);
+    if (!name.trim()) return setProblem({ field: "name", message: t("host.edit.error.emptyName") });
+    if (!address.trim() || /\s/.test(address)) {
+      return setProblem({ field: "address", message: t("host.edit.error.invalidAddress") });
+    }
+    if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+      return setProblem({ field: "port", message: t("host.edit.error.invalidPort") });
+    }
+    const parsed = parseTags(tags);
+    if (parsed.error) return setProblem({ field: "tags", message: t("host.edit.error.invalidTag") });
+    setProblem(null);
+    setBusy(true);
+    const outcome = await api.updateHost(host.id, {
+      name: name.trim(),
+      address: address.trim(),
+      port: portNumber,
+      notes: notes.trim() || null,
+      tags: parsed.tags,
+      groups: selectedGroups,
+    });
+    setBusy(false);
+    if (outcome.status === "ok") {
+      onOpenChange(false);
+    } else {
+      setProblem(errorForEdit(t, outcome.error));
+    }
+  };
+
+  const onGroupSaved = (group: GroupSummary, created: boolean) => {
+    setAvailableGroups((current) => {
+      const without = current.filter((item) => item.id !== group.id);
+      return [...without, group];
+    });
+    if (created) setSelectedGroups((current) => (current.includes(group.id) ? current : [...current, group.id]));
+    setGroupDialog(null);
+  };
+
+  return (
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={onOpenChange}
+        title={t("host.edit.title")}
+        description={t("host.edit.description")}
+        closeLabel={t("host.close")}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+              {t("host.edit.cancel")}
+            </Button>
+            <Button variant="primary" type="submit" form="edit-host" busy={busy}>
+              {t("host.edit.save")}
+            </Button>
+          </>
+        }
+      >
+        <form id="edit-host" onSubmit={(event) => void submit(event)} noValidate className="flex flex-col gap-4">
+          <Field
+            label={t("host.edit.name")}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            error={problem?.field === "name" ? problem.message : undefined}
+            autoFocus
+          />
+          <Field
+            label={t("host.edit.address")}
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            error={problem?.field === "address" ? problem.message : undefined}
+            className="[&_input]:font-mono"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+          <Field
+            label={t("host.edit.port")}
+            value={port}
+            onChange={(event) => setPort(event.target.value)}
+            error={problem?.field === "port" ? problem.message : undefined}
+            inputMode="numeric"
+            className="[&_input]:font-mono"
+          />
+          <TextAreaField
+            label={t("host.edit.notes")}
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            error={problem?.field === "notes" ? problem.message : undefined}
+          />
+          <TextAreaField
+            label={t("host.edit.tags")}
+            hint={t("host.edit.tagsHint")}
+            value={tags}
+            onChange={(event) => setTags(event.target.value)}
+            error={problem?.field === "tags" ? problem.message : undefined}
+          />
+          <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
+            <legend className="text-sm font-medium">{t("host.edit.groups")}</legend>
+            {availableGroups.map((group) => (
+              <div key={group.id} className="flex items-center gap-2 text-sm">
+                <label htmlFor={`host-group-${group.id}`} className="flex min-w-0 flex-1 items-center gap-2">
+                  <input
+                    id={`host-group-${group.id}`}
+                    type="checkbox"
+                    checked={selectedGroups.includes(group.id)}
+                    onChange={(event) =>
+                      setSelectedGroups((current) =>
+                        event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id),
+                      )
+                    }
+                    className="size-4 accent-[var(--primary)]"
+                  />
+                  <span className="min-w-0 truncate">{group.name}</span>
+                </label>
+                <button
+                  type="button"
+                  aria-label={t("host.edit.groupEditButton", { name: group.name })}
+                  className="shrink-0 text-xs text-primary hover:underline"
+                  onClick={() => setGroupDialog({ id: group.id })}
+                >
+                  {t("host.edit.groupEdit")}
+                </button>
+              </div>
+            ))}
+            <Button type="button" variant="ghost" className="-ml-3 w-fit gap-1.5" onClick={() => setGroupDialog({})}>
+              <Plus aria-hidden="true" className="size-4" />
+              {t("host.edit.groupCreate")}
+            </Button>
+          </fieldset>
+          {problem?.field === "form" ? (
+            <p role="alert" className="m-0 text-sm text-attention">
+              {problem.message}
+            </p>
+          ) : null}
+        </form>
+      </Dialog>
+      {groupDialog ? (
+        <GroupDialog
+          key={groupDialog.id ?? "new"}
+          open
+          group={availableGroups.find((group) => group.id === groupDialog.id)}
+          groups={availableGroups}
+          onOpenChange={(next) => !next && setGroupDialog(null)}
+          onSaved={onGroupSaved}
+        />
+      ) : null}
+    </>
+  );
+}
+
+type EditProblem = { field: "name" | "address" | "port" | "notes" | "tags" | "groups" | "form"; message: string };
+
+function errorForEdit(t: ReturnType<typeof useI18n>["t"], error: EditHostError): EditProblem {
+  switch (error.kind) {
+    case "emptyName":
+      return { field: "name", message: t("host.edit.error.emptyName") };
+    case "invalidAddress":
+      return { field: "address", message: t("host.edit.error.invalidAddress") };
+    case "invalidPort":
+      return { field: "port", message: t("host.edit.error.invalidPort") };
+    case "notesTooLong":
+      return { field: "notes", message: t("host.edit.error.notesTooLong") };
+    case "invalidTag":
+      return { field: "tags", message: t("host.edit.error.invalidTag") };
+    case "groupNotFound":
+      return { field: "groups", message: t("host.edit.error.groupNotFound") };
+    case "failed":
+      return {
+        field: "form",
+        message: `${t("failed.body")} ${t("startup.error.reference", { reference: error.reference })}`,
+      };
+  }
+}
+
+function formatTags(tags: Record<string, string>): string {
+  return Object.entries(tags)
+    .map(([key, value]) => (value ? `${key}=${value}` : key))
+    .join("\n");
+}
+
+function parseTags(value: string): { tags: Record<string, string>; error?: true } {
+  const tags: Record<string, string> = {};
+  for (const line of value.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    const key = (separator < 0 ? trimmed : trimmed.slice(0, separator)).trim();
+    const tagValue = separator < 0 ? "" : trimmed.slice(separator + 1).trim();
+    if (!key || key in tags) return { tags, error: true };
+    tags[key] = tagValue;
+  }
+  return { tags };
+}
+
+function GroupDialog({
+  open,
+  group,
+  groups,
+  onOpenChange,
+  onSaved,
+}: {
+  open: boolean;
+  group?: GroupSummary;
+  groups: GroupSummary[];
+  onOpenChange: (open: boolean) => void;
+  onSaved: (group: GroupSummary, created: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const api = useInventory();
+  const [name, setName] = useState(group?.name ?? "");
+  const [parent, setParent] = useState(group?.parent ?? "");
+  const [problem, setProblem] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) return setProblem(t("host.edit.groupError.emptyName"));
+    setBusy(true);
+    const input: GroupInput = { name: name.trim(), parent: parent || null };
+    const outcome = group ? await api.updateGroup(group.id, input) : await api.createGroup(input);
+    setBusy(false);
+    if (outcome.status === "ok") onSaved(outcome.data, !group);
+    else setProblem(groupErrorText(t, outcome.error));
+  };
+  const parentOptions = groups.filter((candidate) => candidate.id !== group?.id);
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={group ? t("host.edit.groupEditTitle") : t("host.edit.groupCreateTitle")}
+      closeLabel={t("host.close")}
+      footer={
+        <>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            {t("host.edit.cancel")}
+          </Button>
+          <Button variant="primary" type="submit" form="edit-group" busy={busy}>
+            {t("host.edit.save")}
+          </Button>
+        </>
+      }
+    >
+      <form id="edit-group" onSubmit={(event) => void submit(event)} noValidate className="flex flex-col gap-4">
+        <Field
+          label={t("host.edit.groupName")}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          error={problem}
+          autoFocus
+        />
+        <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor="group-parent">
+          {t("host.edit.groupParent")}
+          <select
+            id="group-parent"
+            value={parent}
+            onChange={(event) => setParent(event.target.value)}
+            className="h-9 rounded-md border border-border-strong bg-inset px-3 text-sm font-normal"
+          >
+            <option value="">{t("host.edit.groupNoParent")}</option>
+            {parentOptions.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </form>
+    </Dialog>
+  );
+}
+
+function groupErrorText(t: ReturnType<typeof useI18n>["t"], error: GroupError): string {
+  switch (error.kind) {
+    case "emptyName":
+      return t("host.edit.groupError.emptyName");
+    case "parentNotFound":
+      return t("host.edit.groupError.parentNotFound");
+    case "selfParent":
+      return t("host.edit.groupError.selfParent");
+    case "failed":
+      return `${t("failed.body")} ${t("startup.error.reference", { reference: error.reference })}`;
+  }
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {

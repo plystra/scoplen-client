@@ -15,8 +15,8 @@ use specta::Type;
 use uuid::Uuid;
 
 use crate::repository::{
-    AccessProfile, Credential, CredentialBinding, CredentialKind, Host, HostChange, HostGroup,
-    RecordError, Repository, Route, RouteChoice, RouteKind,
+    AccessProfile, Credential, CredentialBinding, CredentialKind, Edit, Host, HostChange,
+    HostGroup, HostGroupChange, RecordError, Repository, Route, RouteChoice, RouteKind,
 };
 use crate::store::{NewObject, Store, StoreError};
 
@@ -192,6 +192,85 @@ pub struct GroupSummary {
     pub parent: Option<String>,
     /// Number of live hosts in the group.
     pub host_count: u32,
+}
+
+/// The editable host metadata owned by the local inventory.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EditHost {
+    /// Display name; it must not be empty.
+    pub name: String,
+    /// DNS name or IP literal.
+    pub address: String,
+    /// SSH port, validated before the object is written.
+    pub port: u32,
+    /// Plain-text notes, or `null` to clear them.
+    pub notes: Option<String>,
+    /// Complete replacement for the tag map.
+    pub tags: BTreeMap<String, String>,
+    /// Complete replacement for host-group membership.
+    pub groups: Vec<String>,
+}
+
+/// Why editing host metadata failed. The host is unchanged for every variant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum EditHostError {
+    /// The display name is empty.
+    #[error("the host name is empty")]
+    EmptyName,
+    /// The address is empty or contains whitespace.
+    #[error("the address is not valid")]
+    InvalidAddress,
+    /// The port is outside the TCP range.
+    #[error("the port is not valid")]
+    InvalidPort,
+    /// Notes exceed the object-model text limit.
+    #[error("the notes are too long")]
+    NotesTooLong,
+    /// A tag key or value is empty or exceeds the object-model text limit.
+    #[error("the tag is not valid")]
+    InvalidTag,
+    /// A requested group does not exist.
+    #[error("the group was not found")]
+    GroupNotFound,
+    /// The local store or model failed without changing the host.
+    #[error("{reference}")]
+    Failed {
+        /// A diagnostic reference safe to show for retryable failures.
+        reference: String,
+    },
+}
+
+/// Input for creating or editing a host group.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupInput {
+    /// Display name; it must not be empty.
+    pub name: String,
+    /// Optional parent group.
+    pub parent: Option<String>,
+}
+
+/// Why creating or editing a group failed. No group is changed for failures.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GroupError {
+    /// The display name is empty.
+    #[error("the group name is empty")]
+    EmptyName,
+    /// A requested parent group does not exist.
+    #[error("the parent group was not found")]
+    ParentNotFound,
+    /// A group cannot be its own parent.
+    #[error("a group cannot be its own parent")]
+    SelfParent,
+    /// The local store or model failed without changing the group.
+    #[error("{reference}")]
+    Failed {
+        /// A diagnostic reference safe to show for retryable failures.
+        reference: String,
+    },
 }
 
 /// How a new host authenticates.
@@ -433,6 +512,165 @@ impl Inventory {
             .collect::<Vec<_>>();
         logins.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(Some(HostDetails { summary, notes: host.notes, logins }))
+    }
+
+    /// Replaces editable host metadata, tags, and group memberships in one
+    /// model write. The host remains unchanged when validation fails.
+    pub fn update_host(
+        &self,
+        host_id: String,
+        input: EditHost,
+    ) -> Result<HostDetails, EditHostError> {
+        let host_uuid =
+            parse_id(&host_id).map_err(|_| edit_failed("the host identifier is invalid"))?;
+        let hosts = Repository::<Host>::new(&self.store);
+        let existing = hosts
+            .get(host_uuid)
+            .map_err(edit_failure)?
+            .ok_or_else(|| edit_failed("the host was not found"))?;
+        let name = input.name.trim().to_owned();
+        if name.is_empty() {
+            return Err(EditHostError::EmptyName);
+        }
+        let address = input.address.trim().to_owned();
+        if address.is_empty() || address.chars().any(char::is_whitespace) {
+            return Err(EditHostError::InvalidAddress);
+        }
+        if input.port == 0 || input.port > u16::MAX as u32 {
+            return Err(EditHostError::InvalidPort);
+        }
+        if input.notes.as_ref().is_some_and(|notes| notes.len() > scoplen_model::MAX_TEXT_BYTES) {
+            return Err(EditHostError::NotesTooLong);
+        }
+        if input.tags.iter().any(|(key, value)| {
+            key.is_empty()
+                || key.len() > scoplen_model::MAX_TEXT_BYTES
+                || value.len() > scoplen_model::MAX_TEXT_BYTES
+        }) {
+            return Err(EditHostError::InvalidTag);
+        }
+
+        let mut groups = BTreeSet::new();
+        let group_repo = Repository::<HostGroup>::new(&self.store);
+        let known_groups = group_repo.list().map_err(edit_failure)?;
+        for group in input.groups {
+            let group_id = parse_id(&group).map_err(|_| EditHostError::GroupNotFound)?;
+            if !known_groups.iter().any(|known| known.meta.id == group_id) {
+                return Err(EditHostError::GroupNotFound);
+            }
+            groups.insert(group_id);
+        }
+        let tags = input.tags;
+        let mut tag_changes = BTreeMap::new();
+        for key in existing.tags.keys().chain(tags.keys()) {
+            if tag_changes.contains_key(key) {
+                continue;
+            }
+            tag_changes.insert(key.clone(), tags.get(key).cloned());
+        }
+        let mut group_changes = BTreeMap::new();
+        for group in existing.groups.iter().chain(groups.iter()) {
+            if group_changes.contains_key(group) {
+                continue;
+            }
+            group_changes.insert(*group, groups.contains(group));
+        }
+        hosts
+            .update(
+                host_uuid,
+                HostChange {
+                    name: Some(name),
+                    address: Some(address),
+                    port: Edit::Set(input.port as u16),
+                    tags: tag_changes,
+                    groups: group_changes,
+                    notes: Edit::from_option(input.notes),
+                    ..Default::default()
+                },
+            )
+            .map_err(edit_failure)?;
+        self.host(host_id)
+            .map_err(|error| EditHostError::Failed { reference: error.to_string() })?
+            .ok_or_else(|| edit_failed("the host disappeared after editing"))
+    }
+
+    /// Creates a host group after validating its optional parent.
+    pub fn create_group(&self, input: GroupInput) -> Result<GroupSummary, GroupError> {
+        let name = input.name.trim().to_owned();
+        if name.is_empty() {
+            return Err(GroupError::EmptyName);
+        }
+        let parent = self.validate_parent(None, input.parent)?;
+        let group = Repository::<HostGroup>::new(&self.store)
+            .create(HostGroupChange {
+                name: Some(name),
+                parent: Edit::from_option(parent),
+                ..Default::default()
+            })
+            .map_err(group_failure)?;
+        self.group_summary(group)
+    }
+
+    /// Updates a host group's name and optional parent.
+    pub fn update_group(
+        &self,
+        group_id: String,
+        input: GroupInput,
+    ) -> Result<GroupSummary, GroupError> {
+        let id =
+            parse_id(&group_id).map_err(|_| group_failed("the group identifier is invalid"))?;
+        let groups = Repository::<HostGroup>::new(&self.store);
+        if groups.get(id).map_err(group_failure)?.is_none() {
+            return Err(group_failed("the group was not found"));
+        }
+        let name = input.name.trim().to_owned();
+        if name.is_empty() {
+            return Err(GroupError::EmptyName);
+        }
+        let parent = self.validate_parent(Some(id), input.parent)?;
+        let group = groups
+            .update(
+                id,
+                HostGroupChange {
+                    name: Some(name),
+                    parent: Edit::from_option(parent),
+                    ..Default::default()
+                },
+            )
+            .map_err(group_failure)?;
+        self.group_summary(group)
+    }
+
+    fn validate_parent(
+        &self,
+        self_id: Option<Uuid>,
+        parent: Option<String>,
+    ) -> Result<Option<Uuid>, GroupError> {
+        let Some(parent) = parent else { return Ok(None) };
+        let parent = parse_id(&parent).map_err(|_| GroupError::ParentNotFound)?;
+        if self_id == Some(parent) {
+            return Err(GroupError::SelfParent);
+        }
+        let groups = Repository::<HostGroup>::new(&self.store);
+        if groups.get(parent).map_err(group_failure)?.is_none() {
+            return Err(GroupError::ParentNotFound);
+        }
+        Ok(Some(parent))
+    }
+
+    fn group_summary(&self, group: HostGroup) -> Result<GroupSummary, GroupError> {
+        let host_count = self
+            .host_records()
+            .map_err(|error| GroupError::Failed { reference: error.to_string() })?
+            .iter()
+            .filter(|host| host.groups.contains(&group.meta.id))
+            .count() as u32;
+        Ok(GroupSummary {
+            id: id(group.meta.id),
+            name: group.name,
+            parent: group.parent.map(id),
+            host_count,
+        })
     }
 
     /// Adds a host, its credential, and its default login atomically.
@@ -724,6 +962,22 @@ fn add_failed(error: impl std::fmt::Display) -> AddHostError {
     AddHostError::Failed { reference: error.to_string() }
 }
 
+fn edit_failure(error: impl std::error::Error) -> EditHostError {
+    EditHostError::Failed { reference: diagnostic(&error) }
+}
+
+fn edit_failed(reference: &str) -> EditHostError {
+    EditHostError::Failed { reference: reference.into() }
+}
+
+fn group_failure(error: impl std::error::Error) -> GroupError {
+    GroupError::Failed { reference: diagnostic(&error) }
+}
+
+fn group_failed(reference: &str) -> GroupError {
+    GroupError::Failed { reference: reference.into() }
+}
+
 fn failed(reference: &str) -> Failure {
     Failure::Failed { reference: reference.into() }
 }
@@ -909,5 +1163,91 @@ mod tests {
         assert!(areas.favorites && areas.keys);
         let hosts = inventory.hosts(HostSource::Favorites, "ROOT".into()).unwrap();
         assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn edits_host_metadata_tags_and_groups_as_one_validated_change() {
+        let inventory = inventory();
+        let group =
+            inventory.create_group(GroupInput { name: "Production".into(), parent: None }).unwrap();
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let edited = inventory
+            .update_host(
+                details.summary.id.clone(),
+                EditHost {
+                    name: "API production".into(),
+                    address: "10.0.0.7".into(),
+                    port: 2222,
+                    notes: Some("owned by platform".into()),
+                    tags: BTreeMap::from([("env".into(), "prod".into())]),
+                    groups: vec![group.id.clone()],
+                },
+            )
+            .unwrap();
+        assert_eq!(edited.summary.name, "API production");
+        assert_eq!(edited.summary.address, "10.0.0.7");
+        assert_eq!(edited.summary.port, 2222);
+        assert_eq!(edited.summary.tags["env"], "prod");
+        assert_eq!(edited.summary.groups, vec![group.id]);
+        assert_eq!(edited.notes.as_deref(), Some("owned by platform"));
+    }
+
+    #[test]
+    fn editing_rejects_invalid_values_without_changing_the_host() {
+        let inventory = inventory();
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let result = inventory.update_host(
+            details.summary.id.clone(),
+            EditHost {
+                name: "".into(),
+                address: "bad address".into(),
+                port: 0,
+                notes: None,
+                tags: BTreeMap::new(),
+                groups: Vec::new(),
+            },
+        );
+        assert_eq!(result, Err(EditHostError::EmptyName));
+        let unchanged = inventory.host(details.summary.id).unwrap().unwrap();
+        assert_eq!(unchanged.summary.name, "api");
+        assert_eq!(unchanged.summary.address, "api.example");
+    }
+
+    #[test]
+    fn group_parent_validation_and_editing_keep_invalid_changes_out() {
+        let inventory = inventory();
+        let group =
+            inventory.create_group(GroupInput { name: "Production".into(), parent: None }).unwrap();
+        assert_eq!(
+            inventory.create_group(GroupInput { name: "".into(), parent: None }),
+            Err(GroupError::EmptyName)
+        );
+        assert_eq!(
+            inventory.update_group(
+                group.id.clone(),
+                GroupInput { name: "Production".into(), parent: Some(group.id.clone()) },
+            ),
+            Err(GroupError::SelfParent)
+        );
+        let updated = inventory
+            .update_group(group.id, GroupInput { name: "Prod".into(), parent: None })
+            .unwrap();
+        assert_eq!(updated.name, "Prod");
     }
 }

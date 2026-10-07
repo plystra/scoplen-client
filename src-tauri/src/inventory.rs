@@ -6,8 +6,8 @@
 
 use crate::local_data::LocalDataState;
 use scoplen_client_core::inventory::{
-    AddHostError, Areas, Deletion, DeletionStore, Failure, GroupSummary, HostDetails, HostSource,
-    HostSummary, Inventory, NewHost,
+    AddHostError, Areas, Deletion, DeletionStore, EditHost, EditHostError, Failure, GroupError,
+    GroupInput, GroupSummary, HostDetails, HostSource, HostSummary, Inventory, NewHost,
 };
 
 /// Process-local undo state shared by inventory command calls.
@@ -118,6 +118,55 @@ pub async fn inventory_set_favorite(
 ) -> Result<(), Failure> {
     let inventory = facade(&local, &state)?;
     blocking(move || inventory.set_favorite(id, favorite)).await
+}
+
+/// Updates host metadata, tags, and group memberships in one core operation.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_update_host(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+    host: EditHost,
+) -> Result<HostDetails, EditHostError> {
+    let store = local
+        .store()
+        .ok_or_else(|| EditHostError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.update_host(id, host))
+        .await
+        .map_err(|error| EditHostError::Failed { reference: error.to_string() })?
+}
+
+/// Creates a host group.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_create_group(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    group: GroupInput,
+) -> Result<GroupSummary, GroupError> {
+    let inventory = facade(&local, &state)
+        .map_err(|error| GroupError::Failed { reference: error.to_string() })?;
+    tauri::async_runtime::spawn_blocking(move || inventory.create_group(group))
+        .await
+        .map_err(|error| GroupError::Failed { reference: error.to_string() })?
+}
+
+/// Updates a host group name and parent.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_update_group(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+    group: GroupInput,
+) -> Result<GroupSummary, GroupError> {
+    let inventory = facade(&local, &state)
+        .map_err(|error| GroupError::Failed { reference: error.to_string() })?;
+    tauri::async_runtime::spawn_blocking(move || inventory.update_group(id, group))
+        .await
+        .map_err(|error| GroupError::Failed { reference: error.to_string() })?
 }
 
 /// Tombstones a host and returns a short-lived undo token.

@@ -9,14 +9,32 @@ import {
   events,
   type AddHostError as IpcAddHostError,
   type Areas as IpcAreas,
+  type EditHost as IpcEditHost,
+  type EditHostError as IpcEditHostError,
   type Failure as IpcFailure,
+  type GroupError as IpcGroupError,
+  type GroupInput as IpcGroupInput,
   type GroupSummary as IpcGroupSummary,
   type HostDetails as IpcHostDetails,
   type HostSource as IpcHostSource,
   type HostSummary as IpcHostSummary,
   type NewHost as IpcNewHost,
 } from "../ipc/bindings";
-import type { AddHostError, Deletion, Failure, HostDetails, HostSource, InventoryApi, NewHost, Outcome } from "./api";
+import type {
+  AddHostError,
+  Deletion,
+  EditHost,
+  EditHostError,
+  Failure,
+  GroupError,
+  GroupInput,
+  GroupSummary,
+  HostDetails,
+  HostSource,
+  InventoryApi,
+  NewHost,
+  Outcome,
+} from "./api";
 
 type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
 
@@ -54,6 +72,18 @@ export function createInventoryApi(): InventoryApi {
       outcome(
         (await commands.inventoryAddHost(input as IpcNewHost)) as Result<HostDetails, IpcAddHostError>,
       ) as Outcome<HostDetails, AddHostError>,
+    updateHost: async (id: string, input: EditHost) =>
+      outcome(
+        (await commands.inventoryUpdateHost(id, input as IpcEditHost)) as Result<HostDetails, IpcEditHostError>,
+      ) as Outcome<HostDetails, EditHostError>,
+    createGroup: async (input: GroupInput) =>
+      outcome(
+        (await commands.inventoryCreateGroup(input as IpcGroupInput)) as Result<GroupSummary, IpcGroupError>,
+      ) as Outcome<GroupSummary, GroupError>,
+    updateGroup: async (id: string, input: GroupInput) =>
+      outcome(
+        (await commands.inventoryUpdateGroup(id, input as IpcGroupInput)) as Result<GroupSummary, IpcGroupError>,
+      ) as Outcome<GroupSummary, GroupError>,
     setFavorite: async (id: string, favorite: boolean) =>
       inventoryOutcome((await commands.inventorySetFavorite(id, favorite)) as Result<null, IpcFailure>),
     deleteHost: async (id: string) =>
