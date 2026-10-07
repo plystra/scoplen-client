@@ -19,6 +19,29 @@ afterEach(() => {
 });
 
 describe("terminal experience adapter", () => {
+  it("does not write xterm constructor-only dimensions when applying a profile", () => {
+    const element = mount();
+    let assigned: Record<string, unknown> | undefined;
+    const terminal = {
+      options: { cols: 80, rows: 24, cursorBlink: false },
+      dispose: () => undefined,
+    } as unknown as { options: Record<string, unknown> };
+    Object.defineProperty(terminal, "options", {
+      configurable: true,
+      get: () => ({ cols: 80, rows: 24, cursorBlink: false }),
+      set: (value: Record<string, unknown>) => {
+        assigned = value;
+      },
+    });
+    (element as unknown as { terminal: typeof terminal }).terminal = terminal;
+
+    element.profile = { cursorBlink: true, scrollback: 8 };
+
+    expect(assigned).toMatchObject({ cursorBlink: true, scrollback: 8 });
+    expect(assigned).not.toHaveProperty("cols");
+    expect(assigned).not.toHaveProperty("rows");
+  });
+
   it("uses xterm scrollback and search while retaining the bounded byte history", async () => {
     let emit: ((chunk: TerminalBytes) => void) | undefined;
     const element = mount({

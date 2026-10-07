@@ -534,7 +534,9 @@ export class ScoplenTerminalElement extends HTMLElementBase {
 
   private applyProfile(): void {
     if (this.terminal) {
-      this.terminal.options = { ...this.terminal.options, ...this._profile };
+      // xterm's options object also exposes constructor-only dimensions such as
+      // `cols` and `rows`; copying it back would make a profile update throw.
+      this.terminal.options = { ...this._profile };
     }
   }
 
