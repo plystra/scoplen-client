@@ -10,6 +10,7 @@ pub mod frames;
 pub mod inventory;
 pub mod local_data;
 mod smoke;
+pub mod ssh;
 mod window_state;
 
 use tauri::Manager as _;
@@ -25,6 +26,7 @@ pub fn ipc() -> Builder<tauri::Wry> {
         .commands(collect_commands![
             commands::app_info,
             commands::shell_ready,
+            ssh::session_connect,
             inventory::inventory_areas,
             inventory::inventory_groups,
             inventory::inventory_hosts,
