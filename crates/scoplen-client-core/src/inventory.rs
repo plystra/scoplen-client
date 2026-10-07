@@ -18,6 +18,7 @@ use crate::repository::{
     AccessProfile, Credential, CredentialBinding, CredentialKind, Edit, Host, HostChange,
     HostGroup, HostGroupChange, RecordError, Repository, Route, RouteChoice, RouteKind,
 };
+use crate::store::device::{SESSION_HISTORY_LIMIT, SessionKind, SessionOutcome};
 use crate::store::{NewObject, Store, StoreError};
 
 const UNDO_LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -178,6 +179,55 @@ pub struct LoginSummary {
     pub route: RouteLabel,
     /// Whether it is the host's default login.
     pub is_default: bool,
+}
+
+/// The kind of a device-local session shown in the Recent area.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum RecentSessionKind {
+    Terminal,
+    Files,
+    Forward,
+}
+
+/// How a device-local session ended, when it is no longer open.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum RecentSessionOutcome {
+    Closed,
+    Failed,
+}
+
+/// A redacted entry in the device-local Recent session history.
+/// This is intentionally a read model. It carries no credential or terminal
+/// data, and recording or reconnecting a session remains the responsibility of
+/// the connection and session managers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentSession {
+    /// The device-local session identifier.
+    pub id: String,
+    /// The live Host this session used.
+    pub host_id: String,
+    /// The Host display name at read time.
+    pub host_name: String,
+    /// The Host DNS name or IP literal.
+    pub address: String,
+    /// The Host SSH port.
+    pub port: u16,
+    /// The login username used by the session.
+    pub username: String,
+    /// The session kind.
+    pub kind: RecentSessionKind,
+    /// Start time in Unix milliseconds, encoded as decimal text at the IPC
+    /// boundary so JavaScript cannot lose precision.
+    pub started_at: String,
+    /// End time in Unix milliseconds, if it has ended.
+    pub ended_at: Option<String>,
+    /// End status, if it has ended.
+    pub outcome: Option<RecentSessionOutcome>,
 }
 
 /// A host group in the sidebar.
@@ -407,7 +457,7 @@ impl Inventory {
         let credentials = Repository::<Credential>::new(&self.store).list().map_err(failure)?;
         let routes = Repository::<Route>::new(&self.store).list().map_err(failure)?;
         let profiles = Repository::<AccessProfile>::new(&self.store).list().map_err(failure)?;
-        let recent = self.store.recent_sessions(1).map_err(failure)?.into_iter().next().is_some();
+        let recent = !self.recent_sessions()?.is_empty();
         Ok(Areas {
             favorites: hosts.iter().any(|host| host.favorite),
             recent,
@@ -480,6 +530,37 @@ impl Inventory {
             right.favorite.cmp(&left.favorite).then_with(|| left.name.cmp(&right.name))
         });
         Ok(summaries)
+    }
+
+    /// Lists the newest device-local sessions with their current Host labels.
+    ///
+    /// Session history can outlive an object deletion or a profile change. An
+    /// entry is therefore exposed only while both its login and Host are live;
+    /// stale entries remain in the local history for retention but never become
+    /// a misleading navigation target.
+    pub fn recent_sessions(&self) -> Result<Vec<RecentSession>, Failure> {
+        let hosts = self.host_records()?;
+        let profiles = self.profiles()?;
+        let sessions = self.store.recent_sessions(SESSION_HISTORY_LIMIT).map_err(failure)?;
+        Ok(sessions
+            .into_iter()
+            .filter_map(|session| {
+                let profile = profiles.iter().find(|profile| profile.meta.id == session.profile)?;
+                let host = hosts.iter().find(|host| host.meta.id == profile.host)?;
+                Some(RecentSession {
+                    id: id(session.id),
+                    host_id: id(host.meta.id),
+                    host_name: host.name.clone(),
+                    address: host.address.clone(),
+                    port: host.port,
+                    username: profile.username.clone(),
+                    kind: recent_session_kind(session.kind),
+                    started_at: session.started_at.to_string(),
+                    ended_at: session.ended_at.map(|value| value.to_string()),
+                    outcome: session.outcome.map(recent_session_outcome),
+                })
+            })
+            .collect())
     }
 
     /// Gets one host and all of its logins.
@@ -870,6 +951,21 @@ fn route_label(profile: &AccessProfile, routes: &[Route]) -> RouteLabel {
     }
 }
 
+fn recent_session_kind(kind: SessionKind) -> RecentSessionKind {
+    match kind {
+        SessionKind::Terminal => RecentSessionKind::Terminal,
+        SessionKind::Files => RecentSessionKind::Files,
+        SessionKind::Forward => RecentSessionKind::Forward,
+    }
+}
+
+fn recent_session_outcome(outcome: SessionOutcome) -> RecentSessionOutcome {
+    match outcome {
+        SessionOutcome::Closed => RecentSessionOutcome::Closed,
+        SessionOutcome::Failed => RecentSessionOutcome::Failed,
+    }
+}
+
 fn credential_label(credential: &Credential) -> CredentialLabel {
     CredentialLabel {
         id: id(credential.meta.id),
@@ -1022,6 +1118,7 @@ mod tests {
     use super::*;
     use crate::repository::{CredentialChange, Edit};
     use crate::store::Store;
+    use crate::store::device::{SessionKind, SessionOutcome};
     use scoplen_crypto::LocalDatabaseKey;
 
     fn inventory() -> Inventory {
@@ -1163,6 +1260,49 @@ mod tests {
         assert!(areas.favorites && areas.keys);
         let hosts = inventory.hosts(HostSource::Favorites, "ROOT".into()).unwrap();
         assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn recent_sessions_are_redacted_ordered_and_skip_orphans() {
+        let inventory = inventory();
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: Some(2222),
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let profile = parse_id(&details.logins[0].id).unwrap();
+        let first = inventory.store.record_session_start(profile, SessionKind::Terminal).unwrap();
+        let second = inventory.store.record_session_start(profile, SessionKind::Files).unwrap();
+        inventory.store.record_session_end(first, SessionOutcome::Failed).unwrap();
+
+        let sessions = inventory.recent_sessions().unwrap();
+        assert_eq!(
+            sessions.iter().map(|session| session.id.clone()).collect::<Vec<_>>(),
+            [id(second), id(first)]
+        );
+        assert_eq!(sessions[0].host_name, "api");
+        assert_eq!(sessions[0].address, "api.example");
+        assert_eq!(sessions[0].username, "ops");
+        assert_eq!(sessions[0].kind, RecentSessionKind::Files);
+        assert_eq!(sessions[0].outcome, None);
+        assert_eq!(sessions[1].kind, RecentSessionKind::Terminal);
+        assert_eq!(sessions[1].outcome, Some(RecentSessionOutcome::Failed));
+        assert!(sessions[1].ended_at.is_some());
+
+        let orphan_profile = scoplen_model::new_uuid_v7().unwrap();
+        inventory.store.record_session_start(orphan_profile, SessionKind::Forward).unwrap();
+        assert_eq!(inventory.recent_sessions().unwrap().len(), 2);
+
+        inventory.delete_host(details.summary.id).unwrap();
+        assert!(inventory.recent_sessions().unwrap().is_empty());
+        assert!(
+            !inventory.areas().unwrap().recent,
+            "orphan history does not expose an empty Recent area"
+        );
     }
 
     #[test]

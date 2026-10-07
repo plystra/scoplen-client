@@ -28,6 +28,7 @@ pub fn ipc() -> Builder<tauri::Wry> {
             inventory::inventory_areas,
             inventory::inventory_groups,
             inventory::inventory_hosts,
+            inventory::inventory_recent_sessions,
             inventory::inventory_host,
             inventory::inventory_add_host,
             inventory::inventory_set_favorite,

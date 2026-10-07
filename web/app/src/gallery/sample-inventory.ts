@@ -17,6 +17,7 @@ import type {
   LoginSummary,
   NewHost,
   Outcome,
+  RecentSession,
 } from "../inventory/api";
 
 const groups: GroupSummary[] = [
@@ -84,6 +85,33 @@ function host(
 }
 
 const jump = { kind: "jump", name: "prod-jump" } as const;
+
+const seededRecentSessions: RecentSession[] = [
+  {
+    id: "s-api-1",
+    hostId: "h-api-1",
+    hostName: "prod-api-01",
+    address: "10.0.1.24",
+    port: 22,
+    username: "deploy",
+    kind: "terminal",
+    startedAt: String(Date.UTC(2026, 9, 7, 9, 15)),
+    endedAt: String(Date.UTC(2026, 9, 7, 10, 2)),
+    outcome: "closed",
+  },
+  {
+    id: "s-db-1",
+    hostId: "h-db-1",
+    hostName: "prod-db-01",
+    address: "10.0.4.12",
+    port: 22,
+    username: "dba",
+    kind: "files",
+    startedAt: String(Date.UTC(2026, 9, 6, 16, 40)),
+    endedAt: null,
+    outcome: null,
+  },
+];
 
 export function sampleHosts(): HostDetails[] {
   return [
@@ -180,9 +208,13 @@ function textBytes(value: string): number {
 }
 
 /** An in-memory inventory for the gallery. */
-export function sampleInventory(initial: HostDetails[], options: { failHosts?: boolean } = {}): InventoryApi {
+export function sampleInventory(
+  initial: HostDetails[],
+  options: { failHosts?: boolean; failRecentSessions?: boolean } = {},
+): InventoryApi {
   let hosts = initial.map((h) => ({ ...h }));
   let availableGroups = groups.map((group) => ({ ...group }));
+  const sessions = seededRecentSessions.map((session) => ({ ...session }));
   const deleted = new Map<string, HostDetails>();
   const listeners = new Set<() => void>();
   const changed = () => listeners.forEach((l) => l());
@@ -191,6 +223,21 @@ export function sampleInventory(initial: HostDetails[], options: { failHosts?: b
       ...group,
       hostCount: hosts.filter((host) => host.groups.includes(group.id)).length,
     }));
+  const recentSessionRows = () =>
+    sessions
+      .filter((session) => hosts.some((host) => host.id === session.hostId))
+      .map((session) => {
+        const current = hosts.find((host) => host.id === session.hostId);
+        return current
+          ? {
+              ...session,
+              hostName: current.name,
+              address: current.address,
+              port: current.port,
+              username: current.username ?? session.username,
+            }
+          : session;
+      });
 
   const matches = (h: HostDetails, query: string) => {
     if (!query) return true;
@@ -202,7 +249,7 @@ export function sampleInventory(initial: HostDetails[], options: { failHosts?: b
   const inSource = (h: HostDetails, source: HostSource) =>
     source.kind === "all" ||
     (source.kind === "favorites" && h.favorite) ||
-    (source.kind === "recent" && ["h-api-1", "h-db-1"].includes(h.id)) ||
+    (source.kind === "recent" && recentSessionRows().some((session) => session.hostId === h.id)) ||
     (source.kind === "group" && h.groups.includes(source.id));
 
   return {
@@ -210,7 +257,7 @@ export function sampleInventory(initial: HostDetails[], options: { failHosts?: b
       wait(
         ok<Areas>({
           favorites: hosts.some((h) => h.favorite),
-          recent: hosts.length > 0,
+          recent: recentSessionRows().length > 0,
           groups: hosts.length > 0,
           keys: true,
           routes: true,
@@ -230,6 +277,13 @@ export function sampleInventory(initial: HostDetails[], options: { failHosts?: b
                 .sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.name.localeCompare(b.name)),
             ),
           ),
+    recentSessions: () =>
+      options.failRecentSessions
+        ? wait({
+            status: "error" as const,
+            error: { kind: "failed" as const, reference: "the local session history is unavailable" },
+          })
+        : wait(ok(recentSessionRows())),
     host: (id) => wait(ok(hosts.find((h) => h.id === id) ?? null)),
     addHost: (input: NewHost) => {
       if (!/^[a-z0-9.:\-[\]]+$/i.test(input.address))

@@ -65,6 +65,24 @@ export interface HostDetails extends HostSummary {
   logins: LoginSummary[];
 }
 
+export type RecentSessionKind = "terminal" | "files" | "forward";
+export type RecentSessionOutcome = "closed" | "failed";
+
+/** A redacted device-local session entry, newest first. */
+export interface RecentSession {
+  id: Id;
+  hostId: Id;
+  hostName: string;
+  address: string;
+  port: number;
+  username: string;
+  kind: RecentSessionKind;
+  /** Decimal Unix milliseconds from the IPC boundary. */
+  startedAt: string;
+  endedAt: string | null;
+  outcome: RecentSessionOutcome | null;
+}
+
 export interface GroupSummary {
   id: Id;
   name: string;
@@ -162,6 +180,8 @@ export interface InventoryApi {
   groups(): Promise<Outcome<GroupSummary[], Failure>>;
   /** Hosts from `source` matching `query` (name, address, username, tags), favorites first, then by name. */
   hosts(source: HostSource, query: string): Promise<Outcome<HostSummary[], Failure>>;
+  /** The newest live device-local sessions, newest first. */
+  recentSessions(): Promise<Outcome<RecentSession[], Failure>>;
   host(id: Id): Promise<Outcome<HostDetails | null, Failure>>;
   addHost(host: NewHost): Promise<Outcome<HostDetails, AddHostError>>;
   updateHost(id: Id, host: EditHost): Promise<Outcome<HostDetails, EditHostError>>;
