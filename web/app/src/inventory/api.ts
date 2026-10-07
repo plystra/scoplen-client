@@ -90,6 +90,103 @@ export interface GroupSummary {
   hostCount: number;
 }
 
+export type CredentialKindInput =
+  "password" | "key" | "certificate" | "agent" | "securityKey" | "deviceKey" | "external";
+export type CredentialBindingInput = "shared" | "device" | "none";
+
+/** A redacted independent credential. It never includes secret material. */
+export interface CredentialSummary {
+  id: Id;
+  name: string | null;
+  kind: CredentialKindInput;
+  binding: CredentialBindingInput;
+  hasSecret: boolean;
+  publicKey: string | null;
+  provider: Record<string, string>;
+  certificateScope: Id | null;
+  profileCount: number;
+  routeCount: number;
+  restored: boolean;
+}
+
+/** Input for creating or replacing a credential. `secret` is write-only. */
+export interface CredentialInput {
+  name: string | null;
+  kind: CredentialKindInput;
+  binding: CredentialBindingInput;
+  secret: string | null;
+  publicKey: string | null;
+  provider: Record<string, string>;
+  certificateScope: Id | null;
+}
+
+export type RouteDefinition =
+  | { kind: "jump"; hops: Id[] }
+  | { kind: "socks5"; proxy: string; credential: Id | null }
+  | { kind: "httpConnect"; proxy: string; credential: Id | null }
+  | { kind: "command"; command: string }
+  | { kind: "managed"; gatewayNetwork: Id };
+
+export interface RouteSummary {
+  id: Id;
+  name: string;
+  definition: RouteDefinition;
+  profileCount: number;
+  restored: boolean;
+}
+
+export interface RouteInput {
+  name: string;
+  definition: RouteDefinition;
+}
+
+export interface AccessProfileSummary {
+  id: Id;
+  host: Id;
+  hostName: string | null;
+  name: string | null;
+  username: string;
+  credential: CredentialLabel | null;
+  credentialId: Id | null;
+  route: RouteLabel;
+  routeId: Id | null;
+  terminalProfile: string | null;
+  startupCommand: string | null;
+  agentForwarding: boolean;
+  isDefault: boolean;
+  restored: boolean;
+}
+
+export interface AccessProfileInput {
+  host: Id;
+  name: string | null;
+  username: string;
+  credential: Id | null;
+  route: Id | null;
+  terminalProfile: string | null;
+  startupCommand: string | null;
+  agentForwarding: boolean;
+  defaultProfile: boolean;
+}
+
+export type ObjectEditError =
+  | { kind: "invalidId"; field: string }
+  | { kind: "notFound"; entity: string }
+  | { kind: "emptyName" }
+  | { kind: "emptyUsername" }
+  | { kind: "textTooLong"; field: string }
+  | { kind: "invalidCredential" }
+  | { kind: "invalidRoute" }
+  | { kind: "invalidProxy" }
+  | { kind: "invalidCommand" }
+  | { kind: "invalidCredentialBinding" }
+  | { kind: "secretRequired" }
+  | { kind: "secretNotAllowed" }
+  | { kind: "inUse" }
+  | { kind: "defaultProfile" }
+  | { kind: "managedRoute" }
+  | { kind: "failed"; reference: string };
+
 export interface EditHost {
   name: string;
   address: string;
@@ -237,6 +334,18 @@ export interface InventoryApi {
   updateHost(id: Id, host: EditHost): Promise<Outcome<HostDetails, EditHostError>>;
   createGroup(group: GroupInput): Promise<Outcome<GroupSummary, GroupError>>;
   updateGroup(id: Id, group: GroupInput): Promise<Outcome<GroupSummary, GroupError>>;
+  accessProfiles(): Promise<Outcome<AccessProfileSummary[], ObjectEditError>>;
+  createAccessProfile(profile: AccessProfileInput): Promise<Outcome<AccessProfileSummary, ObjectEditError>>;
+  updateAccessProfile(id: Id, profile: AccessProfileInput): Promise<Outcome<AccessProfileSummary, ObjectEditError>>;
+  deleteAccessProfile(id: Id): Promise<Outcome<null, ObjectEditError>>;
+  credentials(): Promise<Outcome<CredentialSummary[], ObjectEditError>>;
+  createCredential(credential: CredentialInput): Promise<Outcome<CredentialSummary, ObjectEditError>>;
+  updateCredential(id: Id, credential: CredentialInput): Promise<Outcome<CredentialSummary, ObjectEditError>>;
+  deleteCredential(id: Id): Promise<Outcome<null, ObjectEditError>>;
+  routes(): Promise<Outcome<RouteSummary[], ObjectEditError>>;
+  createRoute(route: RouteInput): Promise<Outcome<RouteSummary, ObjectEditError>>;
+  updateRoute(id: Id, route: RouteInput): Promise<Outcome<RouteSummary, ObjectEditError>>;
+  deleteRoute(id: Id): Promise<Outcome<null, ObjectEditError>>;
   setFavorite(id: Id, favorite: boolean): Promise<Outcome<null, Failure>>;
   /** Deletes the host and its logins, and keys only it used that were never named. */
   deleteHost(id: Id): Promise<Outcome<Deletion, Failure>>;

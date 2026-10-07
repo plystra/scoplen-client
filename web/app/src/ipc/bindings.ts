@@ -37,6 +37,30 @@ export const commands = {
 	inventoryCreateGroup: (group: GroupInput) => typedError<GroupSummary, GroupError>(__TAURI_INVOKE("inventory_create_group", { group })),
 	/**  Updates a host group name and parent. */
 	inventoryUpdateGroup: (id: string, group: GroupInput) => typedError<GroupSummary, GroupError>(__TAURI_INVOKE("inventory_update_group", { id, group })),
+	/**  Lists independent access profiles with redacted references. */
+	inventoryAccessProfiles: () => typedError<AccessProfileSummary[], ObjectEditError>(__TAURI_INVOKE("inventory_access_profiles")),
+	/**  Creates an independent access profile. */
+	inventoryCreateAccessProfile: (profile: AccessProfileInput) => typedError<AccessProfileSummary, ObjectEditError>(__TAURI_INVOKE("inventory_create_access_profile", { profile })),
+	/**  Replaces an independent access profile. */
+	inventoryUpdateAccessProfile: (id: string, profile: AccessProfileInput) => typedError<AccessProfileSummary, ObjectEditError>(__TAURI_INVOKE("inventory_update_access_profile", { id, profile })),
+	/**  Deletes an independent access profile after reference checks. */
+	inventoryDeleteAccessProfile: (id: string) => typedError<null, ObjectEditError>(__TAURI_INVOKE("inventory_delete_access_profile", { id })),
+	/**  Lists redacted independent credentials. */
+	inventoryCredentials: () => typedError<CredentialSummary[], ObjectEditError>(__TAURI_INVOKE("inventory_credentials")),
+	/**  Creates a redacted independent credential. */
+	inventoryCreateCredential: (credential: CredentialInput) => typedError<CredentialSummary, ObjectEditError>(__TAURI_INVOKE("inventory_create_credential", { credential })),
+	/**  Replaces a redacted independent credential. */
+	inventoryUpdateCredential: (id: string, credential: CredentialInput) => typedError<CredentialSummary, ObjectEditError>(__TAURI_INVOKE("inventory_update_credential", { id, credential })),
+	/**  Deletes an independent credential after reference checks. */
+	inventoryDeleteCredential: (id: string) => typedError<null, ObjectEditError>(__TAURI_INVOKE("inventory_delete_credential", { id })),
+	/**  Lists independent routes. */
+	inventoryRoutes: () => typedError<RouteSummary[], ObjectEditError>(__TAURI_INVOKE("inventory_routes")),
+	/**  Creates an independent route. */
+	inventoryCreateRoute: (route: RouteInput) => typedError<RouteSummary, ObjectEditError>(__TAURI_INVOKE("inventory_create_route", { route })),
+	/**  Replaces an independent route. */
+	inventoryUpdateRoute: (id: string, route: RouteInput) => typedError<RouteSummary, ObjectEditError>(__TAURI_INVOKE("inventory_update_route", { id, route })),
+	/**  Deletes an independent route after reference checks. */
+	inventoryDeleteRoute: (id: string) => typedError<null, ObjectEditError>(__TAURI_INVOKE("inventory_delete_route", { id })),
 	/**  Tombstones a host and returns a short-lived undo token. */
 	inventoryDeleteHost: (id: string) => typedError<Deletion, Failure>(__TAURI_INVOKE("inventory_delete_host", { id })),
 	/**  Restores a deletion made by this running desktop process. */
@@ -75,6 +99,60 @@ export const events = {
 };
 
 /* Types */
+/**  Input for creating or replacing an access profile. */
+export type AccessProfileInput = {
+	/**  Host identifier. */
+	host: string,
+	/**  Optional profile name. */
+	name: string | null,
+	/**  Remote username; it must not be empty. */
+	username: string,
+	/**  Credential identifier, or `null` to resolve any usable credential. */
+	credential: string | null,
+	/**  Route identifier, or `null` for direct access. */
+	route: string | null,
+	/**  Local terminal profile name. */
+	terminalProfile: string | null,
+	/**  Startup command. */
+	startupCommand: string | null,
+	/**  Agent forwarding toggle. */
+	agentForwarding: boolean,
+	/**  Make this the host's default profile. */
+	defaultProfile: boolean,
+};
+
+/**  A standalone access profile with its host and redacted references. */
+export type AccessProfileSummary = {
+	/**  The profile identifier. */
+	id: string,
+	/**  The required host identifier. */
+	host: string,
+	/**  The host display name, when the host is live. */
+	hostName: string | null,
+	/**  Optional profile name. */
+	name: string | null,
+	/**  Remote username. */
+	username: string,
+	/**  Credential reference, with no secret material. */
+	credential: CredentialLabel | null,
+	/**  Credential identifier, if selected. */
+	credentialId: string | null,
+	/**  Route label used by the host screens. */
+	route: RouteLabel,
+	/**  Route identifier, or `null` for direct. */
+	routeId: string | null,
+	/**  Local terminal profile name. */
+	terminalProfile: string | null,
+	/**  Command sent after authentication, when configured. */
+	startupCommand: string | null,
+	/**  Whether agent forwarding is enabled. */
+	agentForwarding: boolean,
+	/**  Whether this is the host's default profile. */
+	isDefault: boolean,
+	/**  Whether a later write resurrected this profile. */
+	restored: boolean,
+};
+
 /**  Why adding a host failed. Nothing is saved for any variant. */
 export type AddHostError = 
 /**  The address is empty or contains whitespace. */
@@ -126,6 +204,64 @@ export type Areas = {
 	routes: boolean,
 };
 
+/**  Where a credential resolves its authentication material. */
+export type CredentialBindingInput = 
+/**  Material is encrypted in the replicated object. */
+"shared" | 
+/**  Material is held by each device separately. */
+"device" | 
+/**  Material is resolved at connect time. */
+"none";
+
+/**
+ *  Input for creating or replacing a credential description.
+ * 
+ *  `secret` is accepted only for shared password/private-key credentials and
+ *  is consumed by the core. It is not retained in any returned DTO.
+ */
+export type CredentialInput = {
+	/**  Optional display name. */
+	name: string | null,
+	/**  The credential kind. */
+	kind: CredentialKindInput,
+	/**  Where the secret is resolved. */
+	binding: CredentialBindingInput,
+	/**  A shared password or private-key text. Never returned by the core. */
+	secret: string | null,
+	/**  Public key text for key and agent credentials. */
+	publicKey: string | null,
+	/**
+	 *  External provider reference fields (for example `type`, `path`, and
+	 *  `field`). Values are descriptions and never provider secret material.
+	 */
+	provider: { [key in string]: string },
+	/**  Organization id for a certificate credential. */
+	certificateScope: string | null,
+};
+
+/**
+ *  The kind of credential exposed by the independent object editor.
+ * 
+ *  The wire names intentionally follow the object model while keeping the
+ *  private key kind readable in the interface (the host details read model
+ *  calls it `key`).
+ */
+export type CredentialKindInput = 
+/**  A password stored in the encrypted shared object. */
+"password" | 
+/**  An OpenSSH private key. */
+"key" | 
+/**  An organization-issued certificate. */
+"certificate" | 
+/**  A system SSH agent. */
+"agent" | 
+/**  A hardware security key. */
+"securityKey" | 
+/**  A non-exportable device key. */
+"deviceKey" | 
+/**  An external credential provider. */
+"external";
+
 /**  A credential's non-secret display data. */
 export type CredentialLabel = {
 	/**  The credential identifier. */
@@ -158,6 +294,35 @@ export type CredentialLabelKind =
 "external" | 
 /**  A short-lived certificate. */
 "certificate";
+
+/**
+ *  A redacted credential object. The secret is represented only by
+ *  `has_secret`; it is never returned over IPC.
+ */
+export type CredentialSummary = {
+	/**  The credential identifier. */
+	id: string,
+	/**  The optional user-assigned name. */
+	name: string | null,
+	/**  The credential kind. */
+	kind: CredentialKindInput,
+	/**  The binding of its material. */
+	binding: CredentialBindingInput,
+	/**  Whether a shared secret is present; the secret itself is never exposed. */
+	hasSecret: boolean,
+	/**  The public half of a key, when one is available. */
+	publicKey: string | null,
+	/**  Non-secret provider attributes. */
+	provider: { [key in string]: string },
+	/**  Organization scope for a certificate, when present. */
+	certificateScope: string | null,
+	/**  Number of access profiles that reference this credential. */
+	profileCount: number,
+	/**  Number of routes that reference this credential. */
+	routeCount: number,
+	/**  Whether a later write resurrected this credential. */
+	restored: boolean,
+};
 
 /**  A deletion token returned to the interface. */
 export type Deletion = {
@@ -347,6 +512,44 @@ export type NewHost = {
 };
 
 /**
+ *  Why an independent object edit failed. No operation writes anything for a
+ *  validation error, and references are checked before a write begins.
+ */
+export type ObjectEditError = 
+/**  One of the supplied identifiers is not a UUID. */
+{ kind: "invalidId"; field: string } | 
+/**  A referenced or edited object does not exist. */
+{ kind: "notFound"; entity: string } | 
+/**  A required name is empty. */
+{ kind: "emptyName" } | 
+/**  A required username is empty. */
+{ kind: "emptyUsername" } | 
+/**  A text field exceeds the object-model limit. */
+{ kind: "textTooLong"; field: string } | 
+/**  A profile references a credential of the wrong type or a missing one. */
+{ kind: "invalidCredential" } | 
+/**  A profile or route references a missing route/profile/host. */
+{ kind: "invalidRoute" } | 
+/**  A proxy is not a valid host:port endpoint. */
+{ kind: "invalidProxy" } | 
+/**  A route command is empty or exceeds the model limit. */
+{ kind: "invalidCommand" } | 
+/**  Kind and binding do not satisfy the object model. */
+{ kind: "invalidCredentialBinding" } | 
+/**  Shared password/private-key credentials require material on creation. */
+{ kind: "secretRequired" } | 
+/**  A secret was supplied to a binding that must never store one. */
+{ kind: "secretNotAllowed" } | 
+/**  A route or credential is still referenced by another object. */
+{ kind: "inUse" } | 
+/**  A default profile cannot be deleted until another profile is selected. */
+{ kind: "defaultProfile" } | 
+/**  Managed routes are organization-authored and unavailable locally. */
+{ kind: "managedRoute" } | 
+/**  The local store or model failed without changing the requested object. */
+{ kind: "failed"; reference: string };
+
+/**
  *  A representable entry found in an OpenSSH configuration file. This is a
  *  preview DTO: it never contains private key material.
  */
@@ -526,6 +729,31 @@ export type RecordType =
 /**  A type a newer version of Scoplen defines. */
 "unknown";
 
+/**
+ *  A device-independent route definition. Managed routes are represented so
+ *  that they can be displayed, but local editing rejects them until the
+ *  organization client is available.
+ */
+export type RouteDefinition = 
+/**  Ordered access profiles used as jump hosts. */
+{ kind: "jump"; hops: string[] } | 
+/**  A SOCKS5 proxy at `host:port`. */
+{ kind: "socks5"; proxy: string; credential: string | null } | 
+/**  An HTTP CONNECT proxy at `host:port`. */
+{ kind: "httpConnect"; proxy: string; credential: string | null } | 
+/**  A local OpenSSH `ProxyCommand`. */
+{ kind: "command"; command: string } | 
+/**  A managed gateway network, authored by the organization. */
+{ kind: "managed"; gateway_network: string };
+
+/**  Input for creating or replacing a Route. */
+export type RouteInput = {
+	/**  Display name; it must not be empty. */
+	name: string,
+	/**  Route-specific definition. */
+	definition: RouteDefinition,
+};
+
 /**  How a login reaches its host. */
 export type RouteLabel = 
 /**  A direct SSH connection. */
@@ -546,6 +774,20 @@ name: string } |
 { kind: "bastion"; 
 /**  The route name. */
 name: string };
+
+/**  A redacted Route object. */
+export type RouteSummary = {
+	/**  The route identifier. */
+	id: string,
+	/**  Display name. */
+	name: string,
+	/**  Route-specific definition. */
+	definition: RouteDefinition,
+	/**  Number of access profiles that reference this route. */
+	profileCount: number,
+	/**  Whether a later write resurrected this route. */
+	restored: boolean,
+};
 
 /**  How a new host authenticates. */
 export type SignIn = 

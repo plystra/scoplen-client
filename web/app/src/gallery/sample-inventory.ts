@@ -5,8 +5,12 @@
 // state; it is not part of the application and never ships.
 
 import type {
+  AccessProfileInput,
+  AccessProfileSummary,
   Areas,
   CredentialLabel,
+  CredentialInput,
+  CredentialSummary,
   EditHost,
   GroupSummary,
   GroupInput,
@@ -16,8 +20,12 @@ import type {
   InventoryApi,
   LoginSummary,
   NewHost,
+  ObjectEditError,
   Outcome,
   RecentSession,
+  RouteDefinition,
+  RouteInput,
+  RouteSummary,
 } from "../inventory/api";
 
 const groups: GroupSummary[] = [
@@ -60,6 +68,78 @@ const nasPassword: CredentialLabel = {
   publicKey: null,
 };
 
+const sampleCredentialSeeds: CredentialSummary[] = [
+  {
+    id: laptopKey.id,
+    name: laptopKey.name,
+    kind: "key",
+    binding: "shared",
+    hasSecret: true,
+    publicKey: laptopKey.publicKey,
+    provider: {},
+    certificateScope: null,
+    profileCount: 0,
+    routeCount: 0,
+    restored: false,
+  },
+  {
+    id: deployKey.id,
+    name: deployKey.name,
+    kind: "key",
+    binding: "shared",
+    hasSecret: true,
+    publicKey: deployKey.publicKey,
+    provider: {},
+    certificateScope: null,
+    profileCount: 0,
+    routeCount: 0,
+    restored: false,
+  },
+  {
+    id: agent.id,
+    name: agent.name,
+    kind: "agent",
+    binding: "none",
+    hasSecret: false,
+    publicKey: null,
+    provider: {},
+    certificateScope: null,
+    profileCount: 0,
+    routeCount: 0,
+    restored: false,
+  },
+  {
+    id: nasPassword.id,
+    name: nasPassword.name,
+    kind: "password",
+    binding: "shared",
+    hasSecret: true,
+    publicKey: null,
+    provider: {},
+    certificateScope: null,
+    profileCount: 0,
+    routeCount: 0,
+    restored: false,
+  },
+];
+
+const sampleRouteSeeds: RouteSummary[] = [
+  {
+    id: "r-prod-jump",
+    name: "prod-jump",
+    definition: { kind: "jump", hops: ["l-4"] },
+    profileCount: 0,
+    restored: false,
+  },
+  {
+    id: "r-staging-net",
+    name: "staging-net",
+    definition: { kind: "managed", gatewayNetwork: "gw-staging-net" },
+    profileCount: 0,
+    restored: false,
+  },
+];
+
 function login(
   id: Id,
   username: string,
@@ -82,6 +162,81 @@ function host(
     loginCount: partial.logins.length,
     route: primary?.route ?? { kind: "direct" },
   };
+}
+
+function routeIdForLabel(route: LoginSummary["route"]): Id | null {
+  if (route.kind === "jump" && route.name === "prod-jump") return "r-prod-jump";
+  if (route.kind === "bastion" && route.name === "staging-net") return "r-staging-net";
+  return null;
+}
+
+function routeLabelForSummary(route: RouteSummary): LoginSummary["route"] {
+  switch (route.definition.kind) {
+    case "jump":
+      return { kind: "jump", name: route.name };
+    case "socks5":
+    case "httpConnect":
+      return { kind: "proxy", name: route.name };
+    case "command":
+      return { kind: "command", name: route.name };
+    case "managed":
+      return { kind: "bastion", name: route.name };
+  }
+}
+
+function credentialLabelForSummary(summary: CredentialSummary | undefined): CredentialLabel | null {
+  if (!summary) return null;
+  const kind: CredentialLabel["kind"] = summary.kind;
+  return { id: summary.id, kind, name: summary.name, fingerprint: null, comment: null, publicKey: summary.publicKey };
+}
+
+function profileSeeds(hosts: HostDetails[]): AccessProfileSummary[] {
+  return hosts.flatMap((current) =>
+    current.logins.map((loginSummary) => ({
+      id: loginSummary.id,
+      host: current.id,
+      hostName: current.name,
+      name: loginSummary.name,
+      username: loginSummary.username,
+      credential: loginSummary.credential,
+      credentialId: loginSummary.credential?.id ?? null,
+      route: loginSummary.route,
+      routeId: routeIdForLabel(loginSummary.route),
+      terminalProfile: null,
+      startupCommand: null,
+      agentForwarding: false,
+      isDefault: loginSummary.isDefault,
+      restored: current.restored,
+    })),
+  );
+}
+
+function countedCredentials(
+  credentials: CredentialSummary[],
+  profiles: AccessProfileSummary[],
+  routes: RouteSummary[],
+): CredentialSummary[] {
+  return credentials.map((credential) => ({
+    ...credential,
+    profileCount: profiles.filter((profile) => profile.credentialId === credential.id).length,
+    routeCount: routes.filter((route) => {
+      const definition = route.definition;
+      return (
+        (definition.kind === "socks5" || definition.kind === "httpConnect") && definition.credential === credential.id
+      );
+    }).length,
+  }));
+}
+
+function countedRoutes(routes: RouteSummary[], profiles: AccessProfileSummary[]): RouteSummary[] {
+  return routes.map((route) => ({
+    ...route,
+    profileCount: profiles.filter((profile) => profile.routeId === route.id).length,
+  }));
+}
+
+function objectEditFailure(reference: string): Outcome<never, ObjectEditError> {
+  return { status: "error", error: { kind: "failed", reference } };
 }
 
 const jump = { kind: "jump", name: "prod-jump" } as const;
@@ -215,6 +370,15 @@ export function sampleInventory(
   let hosts = initial.map((h) => ({ ...h }));
   let availableGroups = groups.map((group) => ({ ...group }));
   const sessions = seededRecentSessions.map((session) => ({ ...session }));
+  let profiles = profileSeeds(hosts);
+  let objectCredentials = sampleCredentialSeeds.map((credential) => ({
+    ...credential,
+    provider: { ...credential.provider },
+  }));
+  let objectRoutes = sampleRouteSeeds.map((route) => ({
+    ...route,
+    definition: { ...route.definition } as RouteDefinition,
+  }));
   const deleted = new Map<string, HostDetails>();
   const listeners = new Set<() => void>();
   const changed = () => listeners.forEach((l) => l());
@@ -238,6 +402,19 @@ export function sampleInventory(
             }
           : session;
       });
+  const profileRows = () =>
+    profiles.map((profile) => ({
+      ...profile,
+      hostName: hosts.find((current) => current.id === profile.host)?.name ?? null,
+      credential: credentialLabelForSummary(
+        objectCredentials.find((credential) => credential.id === profile.credentialId),
+      ),
+      route: profile.routeId
+        ? routeLabelForSummary(objectRoutes.find((route) => route.id === profile.routeId) ?? sampleRouteSeeds[0]!)
+        : { kind: "direct" as const },
+    }));
+  const credentialRows = () => countedCredentials(objectCredentials, profileRows(), objectRoutes);
+  const routeRows = () => countedRoutes(objectRoutes, profileRows());
 
   const matches = (h: HostDetails, query: string) => {
     if (!query) return true;
@@ -379,6 +556,204 @@ export function sampleInventory(
       availableGroups = availableGroups.map((group) => (group.id === id ? updated : group));
       changed();
       return wait(ok(updated));
+    },
+    accessProfiles: () => wait(ok(profileRows())),
+    createAccessProfile: (input: AccessProfileInput) => {
+      const currentHost = hosts.find((host) => host.id === input.host);
+      if (!currentHost) return wait(objectEditFailure("host not found"));
+      if (!input.username.trim()) return wait({ status: "error" as const, error: { kind: "emptyUsername" as const } });
+      if (input.credential && !objectCredentials.some((credential) => credential.id === input.credential)) {
+        return wait({ status: "error" as const, error: { kind: "invalidCredential" as const } });
+      }
+      if (input.route && !objectRoutes.some((route) => route.id === input.route)) {
+        return wait({ status: "error" as const, error: { kind: "invalidRoute" as const } });
+      }
+      const id = `l-${Date.now()}`;
+      if (input.defaultProfile)
+        profiles = profiles.map((profile) => ({
+          ...profile,
+          isDefault: profile.host === input.host ? false : profile.isDefault,
+        }));
+      const created: AccessProfileSummary = {
+        id,
+        host: input.host,
+        hostName: currentHost.name,
+        name: input.name?.trim() || null,
+        username: input.username.trim(),
+        credential: credentialLabelForSummary(
+          objectCredentials.find((credential) => credential.id === input.credential),
+        ),
+        credentialId: input.credential,
+        route: input.route
+          ? routeLabelForSummary(objectRoutes.find((route) => route.id === input.route) ?? sampleRouteSeeds[0]!)
+          : { kind: "direct" },
+        routeId: input.route,
+        terminalProfile: input.terminalProfile?.trim() || null,
+        startupCommand: input.startupCommand?.trim() || null,
+        agentForwarding: input.agentForwarding,
+        isDefault: input.defaultProfile,
+        restored: false,
+      };
+      profiles = [...profiles, created];
+      changed();
+      return wait(ok(created));
+    },
+    updateAccessProfile: (id: Id, input: AccessProfileInput) => {
+      const current = profiles.find((profile) => profile.id === id);
+      const currentHost = hosts.find((host) => host.id === input.host);
+      if (!current || !currentHost) return wait(objectEditFailure("access profile not found"));
+      if (!input.username.trim()) return wait({ status: "error" as const, error: { kind: "emptyUsername" as const } });
+      if (input.credential && !objectCredentials.some((credential) => credential.id === input.credential)) {
+        return wait({ status: "error" as const, error: { kind: "invalidCredential" as const } });
+      }
+      if (input.route && !objectRoutes.some((route) => route.id === input.route)) {
+        return wait({ status: "error" as const, error: { kind: "invalidRoute" as const } });
+      }
+      if (input.defaultProfile)
+        profiles = profiles.map((profile) => ({
+          ...profile,
+          isDefault: profile.host === input.host ? false : profile.isDefault,
+        }));
+      const updated: AccessProfileSummary = {
+        ...current,
+        host: input.host,
+        hostName: currentHost.name,
+        name: input.name?.trim() || null,
+        username: input.username.trim(),
+        credential: credentialLabelForSummary(
+          objectCredentials.find((credential) => credential.id === input.credential),
+        ),
+        credentialId: input.credential,
+        route: input.route
+          ? routeLabelForSummary(objectRoutes.find((route) => route.id === input.route) ?? sampleRouteSeeds[0]!)
+          : { kind: "direct" },
+        routeId: input.route,
+        terminalProfile: input.terminalProfile?.trim() || null,
+        startupCommand: input.startupCommand?.trim() || null,
+        agentForwarding: input.agentForwarding,
+        isDefault: input.defaultProfile,
+      };
+      profiles = profiles.map((profile) => (profile.id === id ? updated : profile));
+      changed();
+      return wait(ok(updated));
+    },
+    deleteAccessProfile: (id: Id) => {
+      const current = profiles.find((profile) => profile.id === id);
+      if (!current) return wait(objectEditFailure("access profile not found"));
+      if (current.isDefault) return wait({ status: "error" as const, error: { kind: "defaultProfile" as const } });
+      profiles = profiles.filter((profile) => profile.id !== id);
+      changed();
+      return wait(ok(null));
+    },
+    credentials: () => wait(ok(credentialRows())),
+    createCredential: (input: CredentialInput) => {
+      if (input.name !== null && !input.name.trim())
+        return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (input.binding === "shared" && (input.kind === "password" || input.kind === "key") && !input.secret) {
+        return wait({ status: "error" as const, error: { kind: "secretRequired" as const } });
+      }
+      if (input.secret && input.binding !== "shared")
+        return wait({ status: "error" as const, error: { kind: "secretNotAllowed" as const } });
+      const created: CredentialSummary = {
+        id: `c-${Date.now()}`,
+        name: input.name?.trim() || null,
+        kind: input.kind,
+        binding: input.binding,
+        hasSecret: Boolean(input.secret),
+        publicKey: input.publicKey?.trim() || null,
+        provider: { ...input.provider },
+        certificateScope: input.certificateScope,
+        profileCount: 0,
+        routeCount: 0,
+        restored: false,
+      };
+      objectCredentials = [...objectCredentials, created];
+      changed();
+      return wait(ok(created));
+    },
+    updateCredential: (id: Id, input: CredentialInput) => {
+      const current = objectCredentials.find((credential) => credential.id === id);
+      if (!current) return wait(objectEditFailure("credential not found"));
+      if (input.name !== null && !input.name.trim())
+        return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (
+        input.binding === "shared" &&
+        (input.kind === "password" || input.kind === "key") &&
+        !input.secret &&
+        !current.hasSecret
+      ) {
+        return wait({ status: "error" as const, error: { kind: "secretRequired" as const } });
+      }
+      if (input.secret && input.binding !== "shared")
+        return wait({ status: "error" as const, error: { kind: "secretNotAllowed" as const } });
+      const updated = {
+        ...current,
+        name: input.name?.trim() || null,
+        kind: input.kind,
+        binding: input.binding,
+        hasSecret: input.secret ? true : input.binding === "shared" ? current.hasSecret : false,
+        publicKey: input.publicKey?.trim() || null,
+        provider: { ...input.provider },
+        certificateScope: input.certificateScope,
+      };
+      objectCredentials = objectCredentials.map((credential) => (credential.id === id ? updated : credential));
+      changed();
+      return wait(ok(updated));
+    },
+    deleteCredential: (id: Id) => {
+      const current = objectCredentials.find((credential) => credential.id === id);
+      if (!current) return wait(objectEditFailure("credential not found"));
+      if (
+        profileRows().some((profile) => profile.credentialId === id) ||
+        objectRoutes.some(
+          (route) =>
+            (route.definition.kind === "socks5" || route.definition.kind === "httpConnect") &&
+            route.definition.credential === id,
+        )
+      ) {
+        return wait({ status: "error" as const, error: { kind: "inUse" as const } });
+      }
+      objectCredentials = objectCredentials.filter((credential) => credential.id !== id);
+      changed();
+      return wait(ok(null));
+    },
+    routes: () => wait(ok(routeRows())),
+    createRoute: (input: RouteInput) => {
+      if (!input.name.trim()) return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (input.definition.kind === "managed")
+        return wait({ status: "error" as const, error: { kind: "managedRoute" as const } });
+      const created: RouteSummary = {
+        id: `r-${Date.now()}`,
+        name: input.name.trim(),
+        definition: input.definition,
+        profileCount: 0,
+        restored: false,
+      };
+      objectRoutes = [...objectRoutes, created];
+      changed();
+      return wait(ok(created));
+    },
+    updateRoute: (id: Id, input: RouteInput) => {
+      const current = objectRoutes.find((route) => route.id === id);
+      if (!current) return wait(objectEditFailure("route not found"));
+      if (!input.name.trim()) return wait({ status: "error" as const, error: { kind: "emptyName" as const } });
+      if (input.definition.kind === "managed")
+        return wait({ status: "error" as const, error: { kind: "managedRoute" as const } });
+      const updated = { ...current, name: input.name.trim(), definition: input.definition };
+      objectRoutes = objectRoutes.map((route) => (route.id === id ? updated : route));
+      changed();
+      return wait(ok(updated));
+    },
+    deleteRoute: (id: Id) => {
+      const current = objectRoutes.find((route) => route.id === id);
+      if (!current) return wait(objectEditFailure("route not found"));
+      if (current.definition.kind === "managed")
+        return wait({ status: "error" as const, error: { kind: "managedRoute" as const } });
+      if (profileRows().some((profile) => profile.routeId === id))
+        return wait({ status: "error" as const, error: { kind: "inUse" as const } });
+      objectRoutes = objectRoutes.filter((route) => route.id !== id);
+      changed();
+      return wait(ok(null));
     },
     setFavorite: (id, favorite) => {
       hosts = hosts.map((h) => (h.id === id ? { ...h, favorite } : h));
