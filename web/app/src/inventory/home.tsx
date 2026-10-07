@@ -4,14 +4,7 @@ import { Plus, Star } from "lucide-react";
 import { useRef, useState, type KeyboardEvent } from "react";
 import { useI18n } from "../i18n";
 import { AddHostDialog } from "./add-host";
-import {
-  useInventory,
-  type GroupSummary,
-  type HostSource,
-  type HostSummary,
-  type Id,
-  type RecentSession,
-} from "./api";
+import { useInventory, type GroupSummary, type HostSource, type HostSummary, type Id, type RecentSession } from "./api";
 import { HostDetailsPanel } from "./host-details";
 import { routeText } from "./labels";
 import { useLoad, type Loaded } from "./use-load";
@@ -112,9 +105,7 @@ export function HostsHome() {
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6">
-          {source.kind === "recent" ? (
-            <RecentSessionSection sessions={recentSessions} onSelect={setSelected} />
-          ) : null}
+          {source.kind === "recent" ? <RecentSessionSection sessions={recentSessions} onSelect={setSelected} /> : null}
           {hosts.state === "loading" ? (
             <p className="sr-only" role="status">
               {t("hosts.loading")}

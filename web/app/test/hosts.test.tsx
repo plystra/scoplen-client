@@ -75,7 +75,9 @@ describe("the host list", () => {
     unmount();
     show(sampleInventory(sampleHosts(), { failRecentSessions: true }));
     await screen.findByText("7 hosts");
-    await userEvent.click(within(screen.getByRole("navigation", { name: "Hosts" })).getByRole("button", { name: "Recent" }));
+    await userEvent.click(
+      within(screen.getByRole("navigation", { name: "Hosts" })).getByRole("button", { name: "Recent" }),
+    );
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("local session history is unavailable");
     expect(await screen.findByText("2 hosts")).toBeTruthy();

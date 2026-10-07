@@ -69,9 +69,10 @@ export function createInventoryApi(): InventoryApi {
         (await commands.inventoryHosts(source as IpcHostSource, query)) as Result<IpcHostSummary[], IpcFailure>,
       ),
     recentSessions: async () =>
-      inventoryOutcome(
-        (await commands.inventoryRecentSessions()) as Result<IpcRecentSession[], IpcFailure>,
-      ) as Outcome<RecentSession[], Failure>,
+      inventoryOutcome((await commands.inventoryRecentSessions()) as Result<IpcRecentSession[], IpcFailure>) as Outcome<
+        RecentSession[],
+        Failure
+      >,
     host: async (id: string) =>
       inventoryOutcome((await commands.inventoryHost(id)) as Result<IpcHostDetails | null, IpcFailure>),
     addHost: async (input: NewHost) =>
