@@ -13,6 +13,10 @@ ignore = [
     # macro used by `specta`, which generates the IPC bindings; no `paste` code
     # runs in the application. Remove when specta drops it.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time macro via specta; no runtime code" },
+    # The shared russh stack currently requires rsa 0.10.0-rc.18. No patched
+    # release exists; this client uses RSA only through the bounded SSH adapter,
+    # and the exception is tracked with the shared protocol dependency audit.
+    { id = "RUSTSEC-2023-0071", reason = "no patched rsa release; bounded SSH adapter dependency is tracked as an explicit exception" },
 ]
 
 [licenses]
@@ -22,6 +26,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
+    "ISC",
     "MIT",
     "MPL-2.0",
     "Unicode-3.0",
