@@ -16,9 +16,66 @@ use scoplen_client_core::repository::{
 use scoplen_ssh::ChannelEvent;
 use serde::Serialize;
 use specta::Type;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+
+const SESSION_COMMAND_QUEUE: usize = 64;
+
+/// A command sent from the frontend to one live SSH session.
+#[derive(Debug, Eq, PartialEq)]
+enum SessionCommand {
+    Input(Vec<u8>),
+    Close,
+}
+
+/// Routes frontend session commands to their owning SSH connection task.
+///
+/// The registry is process-local and holds no credentials or channel bytes after
+/// a session has ended. Each session has a bounded command queue so an
+/// untrusted renderer cannot grow memory without limit.
+#[derive(Default)]
+pub struct SessionRegistry {
+    sessions: Mutex<HashMap<String, Sender<SessionCommand>>>,
+}
+
+impl SessionRegistry {
+    fn register(&self, session_id: &str) -> Result<Receiver<SessionCommand>, String> {
+        if session_id.trim().is_empty() {
+            return Err("session id must not be empty".to_owned());
+        }
+        let (sender, receiver) = mpsc::channel(SESSION_COMMAND_QUEUE);
+        let mut sessions =
+            self.sessions.lock().map_err(|_| "session registry is unavailable".to_owned())?;
+        if sessions.contains_key(session_id) {
+            return Err("session is already connected".to_owned());
+        }
+        sessions.insert(session_id.to_owned(), sender);
+        Ok(receiver)
+    }
+
+    fn remove(&self, session_id: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(session_id);
+        }
+    }
+
+    fn send(&self, session_id: &str, command: SessionCommand) -> Result<(), String> {
+        let sender = self
+            .sessions
+            .lock()
+            .map_err(|_| "session registry is unavailable".to_owned())?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "session is not connected".to_owned())?;
+        sender.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => "session command queue is full".to_owned(),
+            mpsc::error::TrySendError::Closed(_) => "session is no longer connected".to_owned(),
+        })
+    }
+}
 
 /// The result of comparing the probed key with this Host's active trust records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Type)]
@@ -140,10 +197,53 @@ pub async fn session_trust_host_key(
 #[specta::specta]
 pub async fn session_connect(
     local: tauri::State<'_, LocalDataState>,
+    registry: tauri::State<'_, SessionRegistry>,
+    profile_id: String,
+    command: Option<String>,
+    pty: bool,
+    session_id: String,
+    frames: Channel<RawFrame>,
+) -> Result<(), String> {
+    let mut commands = if command.is_none() { Some(registry.register(&session_id)?) } else { None };
+    let result =
+        session_connect_inner(&local, profile_id, command, pty, frames, commands.as_mut()).await;
+    if commands.is_some() {
+        registry.remove(&session_id);
+    }
+    result
+}
+
+/// Sends one bounded input chunk to a live shell session.
+#[tauri::command]
+#[specta::specta]
+pub fn session_input(
+    registry: tauri::State<'_, SessionRegistry>,
+    session_id: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    if data.len() > scoplen_client_core::connection::MAX_SSH_INPUT {
+        return Err("session input exceeds the 64 KiB limit".to_owned());
+    }
+    registry.send(&session_id, SessionCommand::Input(data))
+}
+
+/// Closes the transport for a live shell session.
+#[tauri::command]
+#[specta::specta]
+pub fn session_close_transport(
+    registry: tauri::State<'_, SessionRegistry>,
+    session_id: String,
+) -> Result<(), String> {
+    registry.send(&session_id, SessionCommand::Close)
+}
+
+async fn session_connect_inner(
+    local: &LocalDataState,
     profile_id: String,
     command: Option<String>,
     pty: bool,
     frames: Channel<RawFrame>,
+    commands: Option<&mut Receiver<SessionCommand>>,
 ) -> Result<(), String> {
     let store = local.store().ok_or_else(|| "local data is locked".to_owned())?;
     let inventory = Inventory::with_deletions(store.clone(), DeletionStore::default());
@@ -168,7 +268,9 @@ pub async fn session_connect(
             session.request_pty(request).await.map_err(display_connection_error)?;
         }
         session.request_shell().await.map_err(display_connection_error)?;
-        stream_channel(&mut session, &sender).await?;
+        let commands =
+            commands.ok_or_else(|| "session command channel is unavailable".to_owned())?;
+        stream_channel(&mut session, &sender, commands).await?;
     }
     connection.close().await.map_err(display_connection_error)
 }
@@ -194,14 +296,29 @@ fn send_exec_output(sender: &FrameSender, output: SshExecOutput) -> Result<(), S
     Ok(())
 }
 
-async fn stream_channel(session: &mut SshSession, sender: &FrameSender) -> Result<(), String> {
-    while let Some(event) = session.next_event().await.map_err(display_connection_error)? {
-        match event {
-            ChannelEvent::Data(data) | ChannelEvent::ExtendedData { data, .. } => {
-                sender.send(data).map_err(|error| error.to_string())?;
-            }
-            ChannelEvent::Close => break,
-            _ => {}
+async fn stream_channel(
+    session: &mut SshSession,
+    sender: &FrameSender,
+    commands: &mut Receiver<SessionCommand>,
+) -> Result<(), String> {
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                Some(SessionCommand::Input(data)) => {
+                    session.send_data(&data).await.map_err(display_connection_error)?;
+                }
+                Some(SessionCommand::Close) | None => {
+                    session.close().await.map_err(display_connection_error)?;
+                    break;
+                }
+            },
+            event = session.next_event() => match event.map_err(display_connection_error)? {
+                Some(ChannelEvent::Data(data) | ChannelEvent::ExtendedData { data, .. }) => {
+                    sender.send(data).map_err(|error| error.to_string())?;
+                }
+                Some(ChannelEvent::Close) | None => break,
+                Some(_) => {}
+            },
         }
     }
     Ok(())
@@ -215,4 +332,31 @@ fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionCommand, SessionRegistry};
+
+    #[test]
+    fn registry_routes_commands_and_rejects_duplicate_sessions() {
+        let registry = SessionRegistry::default();
+        assert_eq!(registry.register(" ").unwrap_err(), "session id must not be empty");
+
+        let mut receiver = registry.register("session-1").expect("register session");
+        assert_eq!(registry.register("session-1").unwrap_err(), "session is already connected");
+        registry.send("session-1", SessionCommand::Input(vec![1, 2, 3])).expect("route input");
+        registry.send("session-1", SessionCommand::Close).expect("route close");
+        assert_eq!(
+            receiver.try_recv().expect("input command"),
+            SessionCommand::Input(vec![1, 2, 3])
+        );
+        assert_eq!(receiver.try_recv().expect("close command"), SessionCommand::Close);
+
+        registry.remove("session-1");
+        assert_eq!(
+            registry.send("session-1", SessionCommand::Close).unwrap_err(),
+            "session is not connected"
+        );
+    }
 }

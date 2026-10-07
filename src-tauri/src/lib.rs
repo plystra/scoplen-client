@@ -29,6 +29,8 @@ pub fn ipc() -> Builder<tauri::Wry> {
             ssh::session_host_key,
             ssh::session_trust_host_key,
             ssh::session_connect,
+            ssh::session_input,
+            ssh::session_close_transport,
             inventory::inventory_areas,
             inventory::inventory_groups,
             inventory::inventory_hosts,
@@ -114,6 +116,7 @@ pub fn run() {
                 window_state::restore(&window, &store);
             }
             app.manage(local);
+            app.manage(ssh::SessionRegistry::default());
             app.manage(inventory::InventoryState::default());
             Ok(())
         })
