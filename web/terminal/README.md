@@ -1,21 +1,35 @@
 # @scoplen/terminal
 
-`@scoplen/terminal` is the byte boundary shared by the Scoplen desktop client and
-the server web console. It has no Tauri, IPC, client store, network, or
-cryptography dependency.
+`@scoplen/terminal` is the session-agnostic terminal boundary shared by the
+Scoplen desktop client and the server web console. It has no Tauri, IPC, client
+store, network, or cryptography dependency. Callers own the binary source and
+sink and decide which session or transport they represent.
 
-The package currently provides a small framework-agnostic custom element and a
-React binding. It keeps output as bounded `Uint8Array` data, decodes that data
-for a plain text preview, and sends keyboard bytes to a caller-owned sink.
+The package now provides the first terminal experience slice: xterm.js core
+emulation with bounded output retention and scrollback, search, copy and paste,
+profiles, accessible fallback rendering, and explicitly confirmed broadcast
+input. `TerminalWorkspace` provides tabs and split-pane layout state without
+pretending to create a connection. WebGL, Unicode width addons, serialization,
+image protocols, platform-wide IME verification, and the compatibility suite
+remain planned work.
 
 ## Direct custom element
 
 ```ts
-import { defineTerminalElement, type ScoplenTerminalElement } from "@scoplen/terminal";
+import {
+  defineTerminalElement,
+  type ScoplenTerminalElement,
+} from "@scoplen/terminal";
 
 defineTerminalElement();
 const terminal = document.querySelector("scoplen-terminal") as ScoplenTerminalElement;
 
+terminal.profile = {
+  fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+  fontSize: 14,
+  scrollback: 2_000,
+  cursorStyle: "bar",
+};
 terminal.source = {
   subscribe(onChunk, { signal }) {
     const stop = transport.onBytes(onChunk);
@@ -37,18 +51,62 @@ object, `WritableStream<Uint8Array>`, or a function. `send()` serializes sink
 writes and returns a promise; `maxPendingWrites` rejects new input with a
 `TerminalBackpressureError` when the sink cannot keep up.
 
-The element emits `terminal-output`, `terminal-input`, `terminal-error`, and
-`terminal-complete` events. Event `detail` values are `Uint8Array` (or a
-`TerminalError` for `terminal-error`). The element unsubscribes its source and
-rejects queued writes when disconnected. It does not close a caller-owned sink
-on disconnect; call `closeSink()` or `dispose({ closeSink: true })` when that
-ownership is explicit.
+Output bytes are written to xterm.js and retained as the most recent
+`maxOutputBytes` bytes (1 MiB by default). `profile.scrollback` controls the
+xterm scrollback row limit. Input frames are limited to 64 KiB and pending sink
+writes to 32. These limits make a stalled or untrusted transport observable
+instead of allowing unbounded memory growth.
 
-Output is retained as the most recent `maxOutputBytes` bytes (1 MiB by
-default); input frames are limited to 64 KiB and pending sink writes to 32.
-These limits make a stalled or untrusted transport observable instead of
-allowing unbounded memory growth. The preview is plain text and is not a
-terminal emulator.
+The element emits `terminal-output`, `terminal-input`,
+`terminal-broadcast-input`, `terminal-broadcast-state`, `terminal-error`, and
+`terminal-complete`. Event `detail` values are `Uint8Array`, `boolean`, or a
+`TerminalError` according to the event. The element unsubscribes its source,
+disposes xterm.js, and rejects queued writes when disconnected. It does not
+close a caller-owned sink on disconnect; call `closeSink()` or
+`dispose({ closeSink: true })` when that ownership is explicit.
+
+### Search and clipboard
+
+`findNext`, `findPrevious`, and `clearSearch` operate on xterm.js' retained
+scrollback. `copySelection`, `copyAll`, and `paste` use the browser clipboard
+by default or an injected `terminal.clipboard` implementation. Clipboard
+permission or availability failures emit a `TerminalError` with code
+`clipboard` and return `false`.
+
+### Broadcast input
+
+Broadcast is opt-in and requires a confirmation callback because one keystroke
+can affect several sessions. The caller provides a secondary `broadcastSink`:
+
+```ts
+terminal.broadcastSink = (bytes) => broadcastTransport.send(bytes);
+const enabled = await terminal.setBroadcastInput(true, () => confirm("Send input to every selected session?"));
+```
+
+When enabled, the component exposes a visible `Broadcast input on` status
+indicator and emits a broadcast event. A failed secondary write is reported
+without making the primary session input fail.
+
+## Tabs and split panes
+
+`TerminalWorkspace` is a pure layout model. It owns tab titles, pane identity,
+active-tab state, nested horizontal or vertical splits, and subscriptions. It
+does not own sessions, credentials, or transports:
+
+```ts
+import { TerminalWorkspace } from "@scoplen/terminal";
+
+const workspace = new TerminalWorkspace();
+const firstPane = workspace.openTab({ id: "shell", title: "Shell" });
+workspace.splitPane(firstPane, "vertical", "pane:logs");
+const layout = workspace.snapshot();
+```
+
+The client or web console attaches a `scoplen-terminal` element and its
+caller-owned source/sink to each pane. A tab owns its own layout; switching tabs
+changes `snapshot().layout` without altering another tab's panes. Closing a tab
+removes all of its panes; no connection is silently created or destroyed by
+this model.
 
 ## React
 
@@ -58,22 +116,31 @@ import { Terminal } from "@scoplen/terminal/react";
 <Terminal
   source={source}
   sink={sink}
+  profile={{ scrollback: 2_000, cursorBlink: true }}
+  broadcastSink={broadcastSink}
   onTerminalOutput={(bytes) => recordOutput(bytes)}
   onTerminalError={(error) => report(error)}
-/>
+/>;
 ```
 
 The binding only assigns element properties and subscribes to element events.
-It does not know about Tauri or any Scoplen client state, and removes its event
+It does not know about Tauri or Scoplen client state, and removes its event
 listeners when the component unmounts.
 
-## Explicitly pending terminal work
+## Current boundaries
 
-The C4 package boundary does not yet claim xterm.js emulation, WebGL rendering,
-Unicode 15 width handling, search, serialization, SIXEL/iTerm2 images, IME
-composition, broadcast input, profiles, `vttest`/`esctest`, or compatibility
-coverage for full-screen programs. Those capabilities remain later C4 work and
-are not hidden behind this plain preview.
+The following are deliberately not claimed by this slice:
+
+- WebGL renderer and Unicode 15 width provider;
+- scrollback serialization for reconnect and workspace restoration;
+- SIXEL and iTerm2 image protocols;
+- IME behavior verified on every desktop platform;
+- `vttest`, `esctest`, and recorded full-screen program compatibility runs.
+
+The xterm.js core can render an accessible DOM surface with screen-reader mode
+enabled. If a host cannot initialize the renderer, the element keeps the
+bounded text preview, reports a `renderer` error, and remains keyboard and
+screen-reader addressable.
 
 ## Development
 

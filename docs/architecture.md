@@ -31,10 +31,15 @@ element and a React binding. The source and sink boundaries accept
 `AbortSignal` and must provide cancellation. The element serializes sink writes,
 enforces bounded output/input/pending-write limits, and cleans up source
 subscriptions when disconnected. The package has no Tauri or client-core
-dependency, so the server web console can consume the same API. Its current
-renderer is an intentionally small text preview; terminal emulation, WebGL,
-search, serialization, image protocols, IME, and compatibility suites remain
-later C4 work.
+dependency, so the server web console can consume the same API. xterm.js core
+renders ANSI terminal state and bounded scrollback; the search addon, profile,
+clipboard, and explicitly confirmed broadcast APIs remain inside this boundary.
+`TerminalWorkspace` stores session-agnostic tab and nested split layout state;
+the caller binds terminal elements and transports to each pane. Renderer
+initialization has an accessible bounded text fallback and reports a typed
+error when host capabilities are missing. WebGL, Unicode width addons,
+serialization, image protocols, platform-wide IME verification, and the
+`vttest`/`esctest` compatibility suite remain later C4 outcomes.
 
 ## Local data
 

@@ -8,13 +8,25 @@ export {
   defineTerminalElement,
 } from "./terminal-element";
 export { TerminalBackpressureError, TerminalBoundsError, TerminalDisconnectedError, TerminalError } from "./types";
+export { TerminalWorkspace } from "./workspace";
 export type {
   TerminalBytes,
+  TerminalBroadcastConfirmation,
+  TerminalClipboard,
   TerminalElementEventMap,
   TerminalObjectSink,
+  TerminalProfile,
   TerminalSink,
   TerminalSource,
   TerminalSubscription,
   TerminalSubscriptionSource,
   TerminalEventName,
 } from "./types";
+export type {
+  TerminalLayoutNode,
+  TerminalPane,
+  TerminalSplitDirection,
+  TerminalTab,
+  TerminalWorkspaceListener,
+  TerminalWorkspaceSnapshot,
+} from "./workspace";

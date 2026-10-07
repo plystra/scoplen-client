@@ -7,15 +7,27 @@ import {
   ScoplenTerminalElement,
   defineTerminalElement,
 } from "./terminal-element";
-import type { TerminalBytes, TerminalError, TerminalSink, TerminalSource } from "./types";
+import type {
+  TerminalBytes,
+  TerminalClipboard,
+  TerminalError,
+  TerminalProfile,
+  TerminalSink,
+  TerminalSource,
+} from "./types";
 
 export interface TerminalProps extends Omit<HTMLAttributes<ScoplenTerminalElement>, "onError" | "onInput"> {
   source?: TerminalSource | null;
   sink?: TerminalSink | null;
+  broadcastSink?: TerminalSink | null;
+  clipboard?: TerminalClipboard | null;
+  profile?: TerminalProfile;
   maxOutputBytes?: number;
   maxInputBytes?: number;
   maxPendingWrites?: number;
   onTerminalInput?: (bytes: TerminalBytes) => void;
+  onTerminalBroadcastInput?: (bytes: TerminalBytes) => void;
+  onTerminalBroadcastState?: (enabled: boolean) => void;
   onTerminalOutput?: (bytes: TerminalBytes) => void;
   onTerminalError?: (error: TerminalError) => void;
   onTerminalComplete?: () => void;
@@ -34,10 +46,15 @@ export const Terminal = forwardRef<ScoplenTerminalElement, TerminalProps>(functi
   {
     source = null,
     sink = null,
+    broadcastSink = null,
+    clipboard = null,
+    profile,
     maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES,
     maxInputBytes = DEFAULT_MAX_INPUT_BYTES,
     maxPendingWrites = DEFAULT_MAX_PENDING_WRITES,
     onTerminalInput,
+    onTerminalBroadcastInput,
+    onTerminalBroadcastState,
     onTerminalOutput,
     onTerminalError,
     onTerminalComplete,
@@ -55,20 +72,34 @@ export const Terminal = forwardRef<ScoplenTerminalElement, TerminalProps>(functi
       return;
     }
     const input = (event: Event) => onTerminalInput?.((event as CustomEvent<TerminalBytes>).detail.slice());
+    const broadcastInput = (event: Event) =>
+      onTerminalBroadcastInput?.((event as CustomEvent<TerminalBytes>).detail.slice());
+    const broadcastState = (event: Event) => onTerminalBroadcastState?.((event as CustomEvent<boolean>).detail);
     const output = (event: Event) => onTerminalOutput?.((event as CustomEvent<TerminalBytes>).detail.slice());
     const error = (event: Event) => onTerminalError?.((event as CustomEvent<TerminalError>).detail);
     const complete = () => onTerminalComplete?.();
     element.addEventListener("terminal-input", input);
+    element.addEventListener("terminal-broadcast-input", broadcastInput);
+    element.addEventListener("terminal-broadcast-state", broadcastState);
     element.addEventListener("terminal-output", output);
     element.addEventListener("terminal-error", error);
     element.addEventListener("terminal-complete", complete);
     return () => {
       element.removeEventListener("terminal-input", input);
+      element.removeEventListener("terminal-broadcast-input", broadcastInput);
+      element.removeEventListener("terminal-broadcast-state", broadcastState);
       element.removeEventListener("terminal-output", output);
       element.removeEventListener("terminal-error", error);
       element.removeEventListener("terminal-complete", complete);
     };
-  }, [onTerminalInput, onTerminalOutput, onTerminalError, onTerminalComplete]);
+  }, [
+    onTerminalInput,
+    onTerminalBroadcastInput,
+    onTerminalBroadcastState,
+    onTerminalOutput,
+    onTerminalError,
+    onTerminalComplete,
+  ]);
 
   useLayoutEffect(() => {
     defineTerminalElement();
@@ -78,10 +109,15 @@ export const Terminal = forwardRef<ScoplenTerminalElement, TerminalProps>(functi
     }
     element.source = source;
     element.sink = sink;
+    element.broadcastSink = broadcastSink;
+    element.clipboard = clipboard;
+    if (profile) {
+      element.profile = profile;
+    }
     element.maxOutputBytes = maxOutputBytes;
     element.maxInputBytes = maxInputBytes;
     element.maxPendingWrites = maxPendingWrites;
-  }, [source, sink, maxOutputBytes, maxInputBytes, maxPendingWrites]);
+  }, [source, sink, broadcastSink, clipboard, profile, maxOutputBytes, maxInputBytes, maxPendingWrites]);
 
   return (
     <scoplen-terminal
@@ -106,4 +142,4 @@ declare module "react" {
   }
 }
 
-export type { TerminalBytes, TerminalError, TerminalSink, TerminalSource };
+export type { TerminalBytes, TerminalClipboard, TerminalError, TerminalProfile, TerminalSink, TerminalSource };

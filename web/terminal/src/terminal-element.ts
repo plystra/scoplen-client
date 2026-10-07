@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 /* eslint-disable @typescript-eslint/no-invalid-void-type */
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { Terminal as XtermTerminal, type ITerminalOptions } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import {
   TerminalBackpressureError,
   TerminalBoundsError,
   TerminalDisconnectedError,
   TerminalError,
   type TerminalBytes,
+  type TerminalBroadcastConfirmation,
+  type TerminalClipboard,
   type TerminalElementEventMap,
   type TerminalObjectSink,
+  type TerminalProfile,
   type TerminalSink,
   type TerminalSource,
   type TerminalSubscription,
@@ -17,6 +23,20 @@ export const TERMINAL_TAG_NAME = "scoplen-terminal";
 export const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_INPUT_BYTES = 64 * 1024;
 export const DEFAULT_MAX_PENDING_WRITES = 32;
+
+const DEFAULT_PROFILE: TerminalProfile = {
+  cursorBlink: false,
+  cursorStyle: "block",
+  fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+  fontSize: 14,
+  scrollback: 1000,
+  theme: {
+    background: "#111827",
+    foreground: "#f3f4f6",
+    cursor: "#f3f4f6",
+    selectionBackground: "#334155",
+  },
+};
 
 // eslint-disable-next-line @typescript-eslint/no-extraneous-class
 const HTMLElementBase = (typeof HTMLElement === "undefined" ? class {} : HTMLElement) as typeof HTMLElement;
@@ -46,6 +66,13 @@ function positiveLimit(value: number, name: string): number {
   return value;
 }
 
+function nonNegativeLimit(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
 function isReadableStream(source: TerminalSource): source is ReadableStream<TerminalBytes> {
   return typeof ReadableStream !== "undefined" && source instanceof ReadableStream;
 }
@@ -62,40 +89,89 @@ function isObjectSink(sink: TerminalSink): sink is TerminalObjectSink {
   return typeof sink === "object" && sink !== null && "write" in sink && typeof sink.write === "function";
 }
 
-/**
- * A small binary terminal surface. It deliberately renders decoded text only;
- * terminal emulation and xterm.js integrations remain separate work.
- */
+function cloneProfile(profile: TerminalProfile): TerminalProfile {
+  const next = { ...profile };
+  if (next.scrollback !== undefined) {
+    next.scrollback = nonNegativeLimit(next.scrollback, "profile.scrollback");
+  }
+  if (next.fontSize !== undefined && (!Number.isFinite(next.fontSize) || next.fontSize <= 0)) {
+    throw new RangeError("profile.fontSize must be positive");
+  }
+  if (next.theme) {
+    next.theme = { ...next.theme, extendedAnsi: next.theme.extendedAnsi?.slice() };
+  }
+  return next;
+}
+
+function profileWithDefaults(profile: TerminalProfile): TerminalProfile {
+  return cloneProfile({ ...DEFAULT_PROFILE, ...profile, theme: { ...DEFAULT_PROFILE.theme, ...profile.theme } });
+}
+
+function toBinary(value: string): TerminalBytes {
+  return new TextEncoder().encode(value);
+}
+
+function toLatin1(value: string): TerminalBytes {
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes[index] = value.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+/** A bounded terminal surface; transport remains a caller-owned binary source/sink. */
 export class ScoplenTerminalElement extends HTMLElementBase {
   private _source: TerminalSource | null = null;
   private _sink: TerminalSink | null = null;
+  private _broadcastSink: TerminalSink | null = null;
+  private _clipboard: TerminalClipboard | null = null;
+  private _profile: TerminalProfile = profileWithDefaults({});
   private _maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES;
   private _maxInputBytes = DEFAULT_MAX_INPUT_BYTES;
   private _maxPendingWrites = DEFAULT_MAX_PENDING_WRITES;
   private outputBytes = new Uint8Array();
-  private outputNode: HTMLElement | null = null;
+  private terminalHost: HTMLElement | null = null;
+  private fallbackOutput: HTMLElement | null = null;
+  private broadcastIndicator: HTMLElement | null = null;
+  private terminal: XtermTerminal | null = null;
+  private searchAddon: SearchAddon | null = null;
+  private terminalDisposables: Array<{ dispose(): void }> = [];
   private sourceAbort: AbortController | null = null;
   private sourceUnsubscribe: (() => void) | null = null;
   private sinkWriter: WritableStreamDefaultWriter<TerminalBytes> | null = null;
+  private broadcastSinkWriter: WritableStreamDefaultWriter<TerminalBytes> | null = null;
   private writeTail: Promise<void> = Promise.resolve();
   private pendingWrites = 0;
   private lifecycleGeneration = 0;
   private connected = false;
   private listenersAttached = false;
+  private _broadcastInput = false;
 
   constructor() {
     super();
-    if (typeof this.attachShadow === "function") {
-      const shadow = this.attachShadow({ mode: "open" });
-      const style = document.createElement("style");
-      style.textContent =
-        ":host{display:block;contain:content;overflow:auto;background:#111;color:#f3f4f6;font:14px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}pre{margin:0;min-height:1.45em;white-space:pre-wrap;overflow-wrap:anywhere;padding:0.75rem;outline:none}";
-      this.outputNode = document.createElement("pre");
-      this.outputNode.setAttribute("part", "output");
-      this.outputNode.setAttribute("role", "log");
-      this.outputNode.setAttribute("aria-live", "polite");
-      shadow.append(style, this.outputNode);
+    if (typeof this.attachShadow !== "function") {
+      return;
     }
+    const shadow = this.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent =
+      ":host{display:block;contain:content;background:#111827;color:#f3f4f6;min-height:4rem;position:relative;overflow:hidden}:host(:focus-visible){outline:2px solid #60a5fa;outline-offset:2px}.terminal-host{height:100%;width:100%;min-height:inherit}.terminal-host[hidden]{display:none}.fallback-output{box-sizing:border-box;height:100%;min-height:inherit;margin:0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:.75rem;font:14px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.broadcast-indicator{position:absolute;right:.5rem;top:.5rem;border:1px solid #fbbf24;background:#422006;color:#fde68a;padding:.125rem .375rem;font:600 11px/1.4 ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em}.broadcast-indicator[hidden]{display:none}.xterm{height:100%;width:100%;min-height:inherit}";
+    this.terminalHost = document.createElement("div");
+    this.terminalHost.className = "terminal-host";
+    this.terminalHost.setAttribute("part", "terminal");
+    this.fallbackOutput = document.createElement("pre");
+    this.fallbackOutput.className = "fallback-output";
+    this.fallbackOutput.setAttribute("part", "output");
+    this.fallbackOutput.setAttribute("role", "log");
+    this.fallbackOutput.setAttribute("aria-live", "polite");
+    this.broadcastIndicator = document.createElement("span");
+    this.broadcastIndicator.className = "broadcast-indicator";
+    this.broadcastIndicator.setAttribute("part", "broadcast-indicator");
+    this.broadcastIndicator.setAttribute("role", "status");
+    this.broadcastIndicator.setAttribute("aria-live", "polite");
+    this.broadcastIndicator.textContent = "Broadcast input on";
+    this.broadcastIndicator.hidden = true;
+    shadow.append(style, this.terminalHost, this.fallbackOutput, this.broadcastIndicator);
   }
 
   get source(): TerminalSource | null {
@@ -118,6 +194,40 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this._sink = sink;
   }
 
+  get broadcastSink(): TerminalSink | null {
+    return this._broadcastSink;
+  }
+
+  set broadcastSink(sink: TerminalSink | null) {
+    this.releaseBroadcastSinkWriter();
+    this._broadcastSink = sink;
+  }
+
+  get clipboard(): TerminalClipboard | null {
+    return this._clipboard;
+  }
+
+  set clipboard(value: TerminalClipboard | null) {
+    this._clipboard = value;
+  }
+
+  get profile(): TerminalProfile {
+    return cloneProfile(this._profile);
+  }
+
+  set profile(value: TerminalProfile) {
+    this._profile = profileWithDefaults({
+      ...this._profile,
+      ...value,
+      theme: { ...this._profile.theme, ...value.theme },
+    });
+    this.applyProfile();
+  }
+
+  get broadcastInput(): boolean {
+    return this._broadcastInput;
+  }
+
   get maxOutputBytes(): number {
     return this._maxOutputBytes;
   }
@@ -126,7 +236,7 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this._maxOutputBytes = positiveLimit(value, "maxOutputBytes");
     if (this.outputBytes.byteLength > this._maxOutputBytes) {
       this.outputBytes = this.outputBytes.slice(-this._maxOutputBytes);
-      this.renderOutput();
+      this.renderFallbackOutput();
     }
   }
 
@@ -153,11 +263,13 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this.connected = true;
     this.lifecycleGeneration += 1;
     this.setAttribute("role", "application");
+    this.setAttribute("aria-label", "Terminal");
     this.tabIndex = 0;
     if (!this.listenersAttached) {
       this.addEventListener("keydown", this.onKeyDown);
       this.listenersAttached = true;
     }
+    this.ensureTerminal();
     this.attachSource();
   }
 
@@ -168,14 +280,14 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this.connected = false;
     this.lifecycleGeneration += 1;
     this.detachSource();
-    // A transport write cannot be interrupted portably. Every queued write
-    // checks the generation before touching the sink and rejects after detach.
+    this.teardownTerminal();
     this.writeTail = this.writeTail.catch(() => undefined);
   }
 
   /** Stop the source, clear rendered bytes, and optionally close an owned sink. */
   async dispose(options: { closeSink?: boolean } = {}): Promise<void> {
     this.detachSource();
+    this.teardownTerminal();
     this.clearOutput();
     if (options.closeSink) {
       await this.closeSink();
@@ -220,15 +332,25 @@ export class ScoplenTerminalElement extends HTMLElementBase {
       if (!this.connected || generation !== this.lifecycleGeneration) {
         throw new TerminalDisconnectedError();
       }
-      const sink = this._sink;
-      if (sink === null) {
+      if (this._sink === null) {
         this.dispatchInput(bytes);
-      } else if (typeof sink === "function") {
-        await sink(bytes);
-      } else if (isWritableStream(sink)) {
-        await this.getSinkWriter(sink).write(bytes);
       } else {
-        await sink.write(bytes);
+        try {
+          await this.writeSink(this._sink, bytes, false);
+        } catch (error) {
+          this.reportError(error);
+          throw error;
+        }
+      }
+      if (this._broadcastInput) {
+        this.dispatchEvent(new CustomEvent<TerminalBytes>("terminal-broadcast-input", { detail: cloneBytes(bytes) }));
+        if (this._broadcastSink) {
+          try {
+            await this.writeSink(this._broadcastSink, bytes, true);
+          } catch (error) {
+            this.reportError(error);
+          }
+        }
       }
     });
     this.writeTail = task.catch(() => undefined);
@@ -237,14 +359,179 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     });
   }
 
-  /** Return the bounded raw output retained by this element. */
+  /** Enable or disable broadcast input after an explicit user confirmation. */
+  async setBroadcastInput(enabled: boolean, confirm?: TerminalBroadcastConfirmation): Promise<boolean> {
+    if (enabled && !this._broadcastInput) {
+      if (!confirm) {
+        return false;
+      }
+      try {
+        if (!(await confirm())) {
+          return false;
+        }
+      } catch (error) {
+        this.reportError(error);
+        return false;
+      }
+    }
+    this._broadcastInput = enabled;
+    if (this.broadcastIndicator) {
+      this.broadcastIndicator.hidden = !enabled;
+    }
+    this.dispatchEvent(new CustomEvent<boolean>("terminal-broadcast-state", { detail: enabled }));
+    return true;
+  }
+
+  findNext(term: string, options?: ISearchOptions): boolean {
+    if (term.length === 0) {
+      return false;
+    }
+    if (this.searchAddon && this.terminal) {
+      return this.searchAddon.findNext(term, options);
+    }
+    return term.length > 0 && new TextDecoder().decode(this.outputBytes).includes(term);
+  }
+
+  findPrevious(term: string, options?: ISearchOptions): boolean {
+    if (term.length === 0) {
+      return false;
+    }
+    if (this.searchAddon && this.terminal) {
+      return this.searchAddon.findPrevious(term, options);
+    }
+    return term.length > 0 && new TextDecoder().decode(this.outputBytes).includes(term);
+  }
+
+  clearSearch(): void {
+    this.searchAddon?.clearDecorations();
+    this.terminal?.clearSelection();
+  }
+
+  async copySelection(): Promise<boolean> {
+    const text = this.terminal?.getSelection() ?? "";
+    if (!text) {
+      return false;
+    }
+    return this.writeClipboard(text);
+  }
+
+  async copyAll(): Promise<boolean> {
+    if (this.terminal) {
+      this.terminal.selectAll();
+      const text = this.terminal.getSelection();
+      this.terminal.clearSelection();
+      return this.writeClipboard(text);
+    }
+    return this.writeClipboard(new TextDecoder().decode(this.outputBytes));
+  }
+
+  async paste(): Promise<boolean> {
+    const clipboard = this._clipboard ?? (typeof navigator !== "undefined" ? navigator.clipboard : undefined);
+    if (!clipboard?.readText) {
+      this.reportError(new TerminalError("clipboard", "clipboard read is unavailable"));
+      return false;
+    }
+    try {
+      const text = await clipboard.readText();
+      if (this.terminal) {
+        this.terminal.input(text, true);
+      } else {
+        await this.send(toBinary(text));
+      }
+      return true;
+    } catch (error) {
+      this.reportError(new TerminalError("clipboard", String(error)));
+      return false;
+    }
+  }
+
   getOutput(): TerminalBytes {
     return cloneBytes(this.outputBytes);
   }
 
   clearOutput(): void {
     this.outputBytes = new Uint8Array();
-    this.renderOutput();
+    this.terminal?.clear();
+    this.renderFallbackOutput();
+  }
+
+  scrollToBottom(): void {
+    this.terminal?.scrollToBottom();
+  }
+
+  private ensureTerminal(): void {
+    if (this.terminal || !this.terminalHost || !this.connected) {
+      return;
+    }
+    try {
+      const terminal = new XtermTerminal(this.xtermOptions());
+      terminal.open(this.terminalHost);
+      this.terminal = terminal;
+      this.searchAddon = new SearchAddon();
+      terminal.loadAddon(this.searchAddon);
+      this.terminalDisposables = [
+        terminal.onData((data) => {
+          void this.send(toBinary(data)).catch(() => undefined);
+        }),
+        terminal.onBinary((data) => {
+          void this.send(toLatin1(data)).catch(() => undefined);
+        }),
+      ];
+      this.setFallbackVisibility(false);
+      if (this.outputBytes.byteLength > 0) {
+        terminal.write(this.outputBytes);
+      }
+    } catch (error) {
+      this.terminal = null;
+      this.searchAddon = null;
+      this.setFallbackVisibility(true);
+      this.reportError(new TerminalError("renderer", `xterm.js could not initialize: ${String(error)}`));
+    }
+  }
+
+  private teardownTerminal(): void {
+    for (const disposable of this.terminalDisposables) {
+      disposable.dispose();
+    }
+    this.terminalDisposables = [];
+    this.searchAddon?.dispose();
+    this.searchAddon = null;
+    this.terminal?.dispose();
+    this.terminal = null;
+    this.setFallbackVisibility(true);
+  }
+
+  private xtermOptions(): ITerminalOptions {
+    return {
+      ...this._profile,
+      screenReaderMode: true,
+      scrollOnUserInput: true,
+      logLevel: "off",
+    };
+  }
+
+  private applyProfile(): void {
+    if (this.terminal) {
+      this.terminal.options = { ...this.terminal.options, ...this._profile };
+    }
+  }
+
+  private setFallbackVisibility(fallback: boolean): void {
+    if (this.terminalHost) {
+      this.terminalHost.hidden = fallback;
+    }
+    if (this.fallbackOutput) {
+      this.fallbackOutput.hidden = !fallback;
+    }
+    if (fallback) {
+      this.renderFallbackOutput();
+    }
+  }
+
+  private renderFallbackOutput(): void {
+    if (this.fallbackOutput) {
+      this.fallbackOutput.textContent = new TextDecoder().decode(this.outputBytes);
+    }
   }
 
   private attachSource(): void {
@@ -354,17 +641,57 @@ export class ScoplenTerminalElement extends HTMLElementBase {
       merged.set(output, this.outputBytes.byteLength);
       this.outputBytes = merged.byteLength > this._maxOutputBytes ? merged.slice(-this._maxOutputBytes) : merged;
     }
+    if (this.terminal) {
+      this.terminal.write(output);
+    } else {
+      this.renderFallbackOutput();
+    }
     if (exceeded) {
       this.reportError(new TerminalBoundsError("output", this._maxOutputBytes, actualOutputBytes));
     }
-    this.renderOutput();
   }
 
-  private renderOutput(): void {
-    if (!this.outputNode) {
-      return;
+  private async writeSink(sink: TerminalSink, bytes: TerminalBytes, broadcast: boolean): Promise<void> {
+    if (typeof sink === "function") {
+      await sink(cloneBytes(bytes));
+    } else if (isWritableStream(sink)) {
+      await (broadcast ? this.getBroadcastSinkWriter(sink) : this.getSinkWriter(sink)).write(cloneBytes(bytes));
+    } else {
+      await sink.write(cloneBytes(bytes));
     }
-    this.outputNode.textContent = new TextDecoder().decode(this.outputBytes);
+  }
+
+  private async writeClipboard(text: string): Promise<boolean> {
+    const clipboard = this._clipboard ?? (typeof navigator !== "undefined" ? navigator.clipboard : undefined);
+    if (!clipboard?.writeText) {
+      this.reportError(new TerminalError("clipboard", "clipboard write is unavailable"));
+      return false;
+    }
+    try {
+      await clipboard.writeText(text);
+      return true;
+    } catch (error) {
+      this.reportError(new TerminalError("clipboard", String(error)));
+      return false;
+    }
+  }
+
+  private getSinkWriter(stream: WritableStream<TerminalBytes>): WritableStreamDefaultWriter<TerminalBytes> {
+    return (this.sinkWriter ??= stream.getWriter());
+  }
+
+  private getBroadcastSinkWriter(stream: WritableStream<TerminalBytes>): WritableStreamDefaultWriter<TerminalBytes> {
+    return (this.broadcastSinkWriter ??= stream.getWriter());
+  }
+
+  private releaseSinkWriter(): void {
+    this.sinkWriter?.releaseLock();
+    this.sinkWriter = null;
+  }
+
+  private releaseBroadcastSinkWriter(): void {
+    this.broadcastSinkWriter?.releaseLock();
+    this.broadcastSinkWriter = null;
   }
 
   private dispatchInput(bytes: TerminalBytes): void {
@@ -376,16 +703,13 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this.dispatchEvent(new CustomEvent<TerminalError>("terminal-error", { detail: normalized }));
   }
 
-  private getSinkWriter(stream: WritableStream<TerminalBytes>): WritableStreamDefaultWriter<TerminalBytes> {
-    return (this.sinkWriter ??= stream.getWriter());
-  }
-
-  private releaseSinkWriter(): void {
-    this.sinkWriter?.releaseLock();
-    this.sinkWriter = null;
-  }
-
   private readonly onKeyDown = (event: KeyboardEvent): void => {
+    const cameFromXterm = event
+      .composedPath()
+      .some((entry) => entry instanceof HTMLElement && entry.classList.contains("xterm-helper-textarea"));
+    if (cameFromXterm || (this.terminal && event.target !== this)) {
+      return;
+    }
     if (event.isComposing || event.metaKey) {
       return;
     }
@@ -424,7 +748,7 @@ function keyBytes(event: KeyboardEvent): TerminalBytes | null {
   if (event.altKey && event.key.length === 1) {
     value = `\x1b${event.key}`;
   }
-  return value === null ? null : new TextEncoder().encode(value);
+  return value === null ? null : toBinary(value);
 }
 
 export function defineTerminalElement(tagName = TERMINAL_TAG_NAME): typeof ScoplenTerminalElement | undefined {
