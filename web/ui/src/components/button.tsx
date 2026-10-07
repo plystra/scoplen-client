@@ -49,7 +49,7 @@ export function Button({
         .join(" ")}
       {...rest}
     >
-      <span className={busy ? "invisible" : undefined}>{children}</span>
+      <span className={["inline-flex items-center gap-[inherit]", busy ? "invisible" : ""].join(" ")}>{children}</span>
       {busy ? (
         <span aria-hidden="true" className="absolute inset-0 grid place-items-center">
           <span className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />

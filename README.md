@@ -56,6 +56,8 @@ pnpm license-check
 
 On macOS, `scripts/check-offline.sh target/release/bundle/macos/Scoplen.app` verifies that a built application makes no network connection while sync is disabled.
 
+To see every screen and state with sample data, run `pnpm --dir web/app dev` and open `/gallery.html`; see [docs/interface.md](docs/interface.md).
+
 To build the application and confirm that it launches:
 
 ```bash

@@ -4,7 +4,17 @@ import { catalogs } from "../src/i18n";
 import { en } from "../src/messages/en";
 
 /** Sample values for every placeholder used in the catalogs. */
-const sample = { version: "0.1.0", platform: "windows", reference: "E-1" };
+const sample = {
+  version: "0.1.0",
+  platform: "windows",
+  reference: "E-1",
+  count: 3,
+  name: "prod-db-01",
+  query: "db",
+  username: "deploy",
+  label: "laptop",
+  path: "/home/mia/.ssh/id_ed25519",
+};
 
 describe("message catalogs", () => {
   const source = Object.keys(en).sort();
