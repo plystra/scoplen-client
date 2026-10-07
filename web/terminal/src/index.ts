@@ -9,6 +9,8 @@ export {
 } from "./terminal-element";
 export { TerminalBackpressureError, TerminalBoundsError, TerminalDisconnectedError, TerminalError } from "./types";
 export { TerminalWorkspace } from "./workspace";
+export { TerminalImeCompositionBridge } from "./ime";
+export type { TerminalImeCommit } from "./ime";
 export type {
   TerminalBytes,
   TerminalBroadcastConfirmation,

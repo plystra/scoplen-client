@@ -100,6 +100,41 @@ describe("ScoplenTerminalElement", () => {
     expect(writes).toEqual([[65], [13], [27, 91, 65], [3]]);
   });
 
+  it("commits only compositionend text and never sends composition updates", async () => {
+    const writes: string[] = [];
+    const element = mount({
+      sink: (chunk) => {
+        writes.push(new TextDecoder().decode(chunk));
+      },
+    });
+    element.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+    element.dispatchEvent(new CompositionEvent("compositionupdate", { data: "n" }));
+    element.dispatchEvent(new CompositionEvent("compositionupdate", { data: "ni" }));
+    expect(writes).toEqual([]);
+    element.dispatchEvent(new CompositionEvent("compositionend", { data: "你" }));
+    await flush();
+    expect(writes).toEqual(["你"]);
+  });
+
+  it("cancels composition on explicit cancellation and focus loss", async () => {
+    const writes: string[] = [];
+    const element = mount({
+      sink: (chunk) => {
+        writes.push(new TextDecoder().decode(chunk));
+      },
+    });
+    element.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+    element.dispatchEvent(new CompositionEvent("compositionupdate", { data: "候选" }));
+    element.dispatchEvent(new CompositionEvent("compositioncancel", { data: "" }));
+    element.dispatchEvent(new CompositionEvent("compositionend", { data: "候选" }));
+    element.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+    element.dispatchEvent(new CompositionEvent("compositionupdate", { data: "失焦" }));
+    element.dispatchEvent(new FocusEvent("blur"));
+    element.dispatchEvent(new CompositionEvent("compositionend", { data: "失焦" }));
+    await flush();
+    expect(writes).toEqual([]);
+  });
+
   it("exposes a custom element constructor for direct consumers", () => {
     expect(document.createElement("scoplen-terminal")).toBeInstanceOf(ScoplenTerminalElement);
   });

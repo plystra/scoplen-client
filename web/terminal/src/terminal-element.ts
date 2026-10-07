@@ -18,6 +18,7 @@ import {
   type TerminalSource,
   type TerminalSubscription,
 } from "./types";
+import { TerminalImeCompositionBridge } from "./ime";
 
 export const TERMINAL_TAG_NAME = "scoplen-terminal";
 export const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -119,6 +120,16 @@ function toLatin1(value: string): TerminalBytes {
   return bytes;
 }
 
+function cameFromXtermHelper(event: Event): boolean {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
+  return path.some(
+    (entry) =>
+      typeof HTMLElement !== "undefined" &&
+      entry instanceof HTMLElement &&
+      entry.classList.contains("xterm-helper-textarea"),
+  );
+}
+
 /** A bounded terminal surface; transport remains a caller-owned binary source/sink. */
 export class ScoplenTerminalElement extends HTMLElementBase {
   private _source: TerminalSource | null = null;
@@ -146,6 +157,9 @@ export class ScoplenTerminalElement extends HTMLElementBase {
   private connected = false;
   private listenersAttached = false;
   private _broadcastInput = false;
+  private readonly ime = new TerminalImeCompositionBridge((text) => {
+    void this.send(toBinary(text)).catch(() => undefined);
+  });
 
   constructor() {
     super();
@@ -267,6 +281,11 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this.tabIndex = 0;
     if (!this.listenersAttached) {
       this.addEventListener("keydown", this.onKeyDown);
+      this.addEventListener("compositionstart", this.onCompositionStart);
+      this.addEventListener("compositionupdate", this.onCompositionUpdate);
+      this.addEventListener("compositionend", this.onCompositionEnd);
+      this.addEventListener("compositioncancel", this.onCompositionCancel);
+      this.addEventListener("blur", this.onBlur, true);
       this.listenersAttached = true;
     }
     this.ensureTerminal();
@@ -279,6 +298,7 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     }
     this.connected = false;
     this.lifecycleGeneration += 1;
+    this.ime.cancel();
     this.detachSource();
     this.teardownTerminal();
     this.writeTail = this.writeTail.catch(() => undefined);
@@ -704,10 +724,7 @@ export class ScoplenTerminalElement extends HTMLElementBase {
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    const cameFromXterm = event
-      .composedPath()
-      .some((entry) => entry instanceof HTMLElement && entry.classList.contains("xterm-helper-textarea"));
-    if (cameFromXterm || (this.terminal && event.target !== this)) {
+    if (cameFromXtermHelper(event) || (this.terminal && event.target !== this)) {
       return;
     }
     if (event.isComposing || event.metaKey) {
@@ -719,6 +736,36 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     }
     event.preventDefault();
     void this.send(bytes).catch(() => undefined);
+  };
+
+  private readonly onCompositionStart = (event: CompositionEvent): void => {
+    if (!cameFromXtermHelper(event)) {
+      this.ime.start(event.data);
+    }
+  };
+
+  private readonly onCompositionUpdate = (event: CompositionEvent): void => {
+    if (!cameFromXtermHelper(event)) {
+      this.ime.update(event.data);
+    }
+  };
+
+  private readonly onCompositionEnd = (event: CompositionEvent): void => {
+    if (!cameFromXtermHelper(event)) {
+      this.ime.end(event.data);
+    }
+  };
+
+  private readonly onCompositionCancel = (event: Event): void => {
+    if (!cameFromXtermHelper(event)) {
+      this.ime.cancel();
+    }
+  };
+
+  private readonly onBlur = (event: FocusEvent): void => {
+    if (!cameFromXtermHelper(event)) {
+      this.ime.blur();
+    }
   };
 }
 
