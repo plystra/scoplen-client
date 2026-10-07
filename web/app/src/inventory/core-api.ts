@@ -19,6 +19,7 @@ import {
   type HostSource as IpcHostSource,
   type HostSummary as IpcHostSummary,
   type NewHost as IpcNewHost,
+  type RecentSession as IpcRecentSession,
 } from "../ipc/bindings";
 import type {
   AddHostError,
@@ -34,6 +35,7 @@ import type {
   InventoryApi,
   NewHost,
   Outcome,
+  RecentSession,
 } from "./api";
 
 type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
@@ -66,6 +68,10 @@ export function createInventoryApi(): InventoryApi {
       inventoryOutcome(
         (await commands.inventoryHosts(source as IpcHostSource, query)) as Result<IpcHostSummary[], IpcFailure>,
       ),
+    recentSessions: async () =>
+      inventoryOutcome(
+        (await commands.inventoryRecentSessions()) as Result<IpcRecentSession[], IpcFailure>,
+      ) as Outcome<RecentSession[], Failure>,
     host: async (id: string) =>
       inventoryOutcome((await commands.inventoryHost(id)) as Result<IpcHostDetails | null, IpcFailure>),
     addHost: async (input: NewHost) =>

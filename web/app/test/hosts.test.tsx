@@ -62,6 +62,25 @@ describe("the host list", () => {
     expect(within(sidebar).getByRole("button", { name: "Databases" }).getAttribute("aria-current")).toBe("page");
   });
 
+  it("shows redacted recent session history and keeps it separate from host loading", async () => {
+    const { unmount } = show(sampleInventory(sampleHosts()));
+    await screen.findByText("7 hosts");
+    const sidebar = screen.getByRole("navigation", { name: "Hosts" });
+    await userEvent.click(within(sidebar).getByRole("button", { name: "Recent" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "Recent sessions" })).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Recent sessions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /prod-api-01.*Terminal/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /prod-db-01.*Files/i })).toBeTruthy();
+
+    unmount();
+    show(sampleInventory(sampleHosts(), { failRecentSessions: true }));
+    await screen.findByText("7 hosts");
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Hosts" })).getByRole("button", { name: "Recent" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("local session history is unavailable");
+    expect(await screen.findByText("2 hosts")).toBeTruthy();
+  });
+
   it("stars and unstars a host", async () => {
     show(sampleInventory(sampleHosts()));
     await screen.findByText("7 hosts");

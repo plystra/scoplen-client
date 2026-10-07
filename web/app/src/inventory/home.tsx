@@ -4,10 +4,17 @@ import { Plus, Star } from "lucide-react";
 import { useRef, useState, type KeyboardEvent } from "react";
 import { useI18n } from "../i18n";
 import { AddHostDialog } from "./add-host";
-import { useInventory, type GroupSummary, type HostSource, type HostSummary, type Id } from "./api";
+import {
+  useInventory,
+  type GroupSummary,
+  type HostSource,
+  type HostSummary,
+  type Id,
+  type RecentSession,
+} from "./api";
 import { HostDetailsPanel } from "./host-details";
 import { routeText } from "./labels";
-import { useLoad } from "./use-load";
+import { useLoad, type Loaded } from "./use-load";
 
 type Toast = { message: string; undo?: string } | null;
 
@@ -28,6 +35,7 @@ export function HostsHome() {
   const areas = useLoad(() => api.areas(), "areas");
   const groups = useLoad(() => api.groups(), "groups");
   const hosts = useLoad(() => api.hosts(source, query.trim()), `${sourceKey}|${query.trim()}`);
+  const recentSessions = useLoad(() => api.recentSessions(), "recent-sessions");
 
   const groupList = groups.state === "ready" ? groups.data : [];
   const title =
@@ -104,6 +112,9 @@ export function HostsHome() {
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6">
+          {source.kind === "recent" ? (
+            <RecentSessionSection sessions={recentSessions} onSelect={setSelected} />
+          ) : null}
           {hosts.state === "loading" ? (
             <p className="sr-only" role="status">
               {t("hosts.loading")}
@@ -208,6 +219,84 @@ export function HostsHome() {
 function Empty({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex flex-col items-center px-6 py-20 text-center text-sm text-muted-foreground">{children}</div>
+  );
+}
+
+function RecentSessionSection({
+  sessions,
+  onSelect,
+}: {
+  sessions: Loaded<RecentSession[]>;
+  onSelect: (id: Id) => void;
+}) {
+  const { t } = useI18n();
+  if (sessions.state === "loading") {
+    return (
+      <p className="sr-only" role="status">
+        {t("hosts.recentSessions.loading")}
+      </p>
+    );
+  }
+  if (sessions.state === "failed") {
+    return (
+      <p role="alert" className="px-3 py-3 text-sm text-attention">
+        {t("failed.body")} {t("startup.error.reference", { reference: sessions.reference })}
+      </p>
+    );
+  }
+  return (
+    <section aria-labelledby="recent-sessions-title" className="border-b border-border px-3 pt-1 pb-4">
+      <h2 id="recent-sessions-title" className="px-3 pb-2 text-xs font-medium text-muted-foreground">
+        {t("hosts.recentSessions")}
+      </h2>
+      {sessions.data.length === 0 ? (
+        <p className="px-3 text-sm text-muted-foreground">{t("hosts.recentSessions.empty")}</p>
+      ) : (
+        <ul aria-label={t("hosts.recentSessions")} className="m-0 flex list-none flex-col p-0">
+          {sessions.data.map((session) => (
+            <RecentSessionRow key={session.id} session={session} onSelect={onSelect} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function RecentSessionRow({ session, onSelect }: { session: RecentSession; onSelect: (id: Id) => void }) {
+  const { t } = useI18n();
+  const status = session.outcome === null ? "open" : session.outcome;
+  const date = new Date(Number(session.startedAt));
+  const formatted = Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelect(session.hostId)}
+        className="flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left hover:bg-inset/60 focus-visible:outline-offset-0"
+      >
+        <span className="flex min-w-0 items-center justify-between gap-3">
+          <span className="truncate text-sm font-medium text-foreground">{session.hostName}</span>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {t(`hosts.recentSessions.kind.${session.kind}`)}
+          </span>
+        </span>
+        <span className="flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
+          <span className="truncate font-mono">
+            {session.username ? `${session.username}@` : ""}
+            {session.address}
+            {session.port !== 22 ? `:${session.port}` : ""}
+          </span>
+          <span className={status === "failed" ? "shrink-0 text-attention" : "shrink-0"}>
+            {t(`hosts.recentSessions.${status}`)}
+          </span>
+        </span>
+        {formatted ? (
+          <time dateTime={date.toISOString()} className="text-xs text-muted-foreground">
+            {formatted}
+          </time>
+        ) : null}
+      </button>
+    </li>
   );
 }
 

@@ -8,6 +8,7 @@ use crate::local_data::LocalDataState;
 use scoplen_client_core::inventory::{
     AddHostError, Areas, Deletion, DeletionStore, EditHost, EditHostError, Failure, GroupError,
     GroupInput, GroupSummary, HostDetails, HostSource, HostSummary, Inventory, NewHost,
+    RecentSession,
 };
 
 /// Process-local undo state shared by inventory command calls.
@@ -78,6 +79,17 @@ pub async fn inventory_hosts(
 ) -> Result<Vec<HostSummary>, Failure> {
     let inventory = facade(&local, &state)?;
     blocking(move || inventory.hosts(source, query)).await
+}
+
+/// Lists the newest live entries in the device-local Recent session history.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_recent_sessions(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+) -> Result<Vec<RecentSession>, Failure> {
+    let inventory = facade(&local, &state)?;
+    blocking(move || inventory.recent_sessions()).await
 }
 
 /// Reads one host and its logins.

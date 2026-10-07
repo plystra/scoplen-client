@@ -18,6 +18,8 @@ export const commands = {
 	inventoryGroups: () => typedError<GroupSummary[], Failure>(__TAURI_INVOKE("inventory_groups")),
 	/**  Lists hosts from a source, filtered by the optional query. */
 	inventoryHosts: (source: HostSource, query: string) => typedError<HostSummary[], Failure>(__TAURI_INVOKE("inventory_hosts", { source, query })),
+	/**  Lists the newest live entries in the device-local Recent session history. */
+	inventoryRecentSessions: () => typedError<RecentSession[], Failure>(__TAURI_INVOKE("inventory_recent_sessions")),
 	/**  Reads one host and its logins. */
 	inventoryHost: (id: string) => typedError<({
 	/**  Plain-text notes. */
@@ -345,6 +347,44 @@ export type Protection =
 "keystoreAndPassphrase" | 
 /**  A local passphrase alone, on a platform without a keystore. */
 "passphraseOnly";
+
+/**
+ *  A redacted entry in the device-local Recent session history.
+ *  This is intentionally a read model. It carries no credential or terminal
+ *  data, and recording or reconnecting a session remains the responsibility of
+ *  the connection and session managers.
+ */
+export type RecentSession = {
+	/**  The device-local session identifier. */
+	id: string,
+	/**  The live Host this session used. */
+	hostId: string,
+	/**  The Host display name at read time. */
+	hostName: string,
+	/**  The Host DNS name or IP literal. */
+	address: string,
+	/**  The Host SSH port. */
+	port: number,
+	/**  The login username used by the session. */
+	username: string,
+	/**  The session kind. */
+	kind: RecentSessionKind,
+	/**
+	 *  Start time in Unix milliseconds, encoded as decimal text at the IPC
+	 *  boundary so JavaScript cannot lose precision.
+	 */
+	startedAt: string,
+	/**  End time in Unix milliseconds, if it has ended. */
+	endedAt: string | null,
+	/**  End status, if it has ended. */
+	outcome: RecentSessionOutcome | null,
+};
+
+/**  The kind of a device-local session shown in the Recent area. */
+export type RecentSessionKind = "terminal" | "files" | "forward";
+
+/**  How a device-local session ended, when it is no longer open. */
+export type RecentSessionOutcome = "closed" | "failed";
 
 /**  The type of a changed object, in the frontend's terms. */
 export type RecordType = 
