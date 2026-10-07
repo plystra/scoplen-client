@@ -52,6 +52,9 @@ pub enum StoreError {
     /// The object to change does not exist.
     #[error("object {0} does not exist")]
     NotFound(Uuid),
+    /// A create operation supplied an identifier already in the store.
+    #[error("object {0} already exists")]
+    AlreadyExists(Uuid),
     /// A stored object could not be decoded.
     #[error("stored object {id} is unreadable")]
     Corrupt {
@@ -86,6 +89,20 @@ pub enum StoreError {
 pub struct LocalWrite {
     /// The object to change; `None` creates a new object.
     pub id: Option<Uuid>,
+    /// The object's type.
+    pub object_type: ObjectType,
+    /// The fields to set.
+    pub fields: Vec<(FieldPath, cbor::Value)>,
+}
+
+/// A new object to create as part of one atomic write.
+///
+/// The identifier is supplied by the caller so that related objects can refer
+/// to one another before the transaction is committed. It must be a UUIDv7.
+#[derive(Debug, Clone)]
+pub struct NewObject {
+    /// The identifier of the new object.
+    pub id: Uuid,
     /// The object's type.
     pub object_type: ObjectType,
     /// The fields to set.
@@ -211,67 +228,133 @@ impl Store {
     /// The change is stamped with the next device clock, merged with the
     /// stored object, validated against the object model, and committed.
     pub fn write(&self, write: LocalWrite) -> Result<Object, StoreError> {
-        let object_type = write.object_type;
-        let object = {
+        self.write_batch(vec![write]).map(|mut objects| objects.remove(0))
+    }
+
+    /// Applies several local changes in one transaction.
+    ///
+    /// Every object is validated before the transaction commits. Listeners are
+    /// notified only after the commit, once per object type.
+    pub fn write_batch(&self, writes: Vec<LocalWrite>) -> Result<Vec<Object>, StoreError> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (objects, changes) = {
             let mut conn = self.conn();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let clock = next_clock(&tx)?;
-            let existing = match write.id {
-                Some(id) => Some(read_object(&tx, id)?.ok_or(StoreError::NotFound(id))?),
-                None => None,
-            };
-            let id = match write.id {
-                Some(id) => id,
-                None => scoplen_model::new_uuid_v7()?,
-            };
-            // The written version is the stored object with the new entries
-            // applied; merging it with the stored version applies the merge
-            // rules and validates the result as a complete object.
-            let mut written = match &existing {
-                Some(stored) => stored.clone(),
-                None => Object::new(id, object_type, scoplen_model::CURRENT_SCHEMA_VERSION)?,
-            };
-            if written.object_type != object_type {
-                return Err(StoreError::Merge(MergeError::TypeMismatch {
-                    local: written.object_type,
-                    remote: object_type,
-                }));
+            let mut objects = Vec::with_capacity(writes.len());
+            for write in writes {
+                objects.push(apply_write(&tx, self.device_id, write)?);
             }
-            for (path, value) in write.fields {
-                written.insert(path, FieldEntry::new(value, clock, self.device_id)?)?;
-            }
-            let merged = match &existing {
-                Some(stored) => scoplen_model::merge(stored, &written)?,
-                None => {
-                    written.validate()?;
-                    ensure_vault_capacity(&tx, None)?;
-                    written
-                }
-            };
-            store_object(&tx, &merged, None)?;
             tx.commit()?;
-            merged
+            let changes = grouped_changes(&objects);
+            (objects, changes)
         };
-        self.notify(&Change { object_type, ids: vec![object.id] });
-        Ok(object)
+        for change in changes {
+            self.notify(&change);
+        }
+        Ok(objects)
+    }
+
+    /// Creates several related objects in one transaction.
+    pub fn create_batch(&self, creates: Vec<NewObject>) -> Result<Vec<Object>, StoreError> {
+        if creates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (objects, changes) = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut objects = Vec::with_capacity(creates.len());
+            for create in creates {
+                objects.push(apply_create(&tx, self.device_id, create)?);
+            }
+            tx.commit()?;
+            let changes = grouped_changes(&objects);
+            (objects, changes)
+        };
+        for change in changes {
+            self.notify(&change);
+        }
+        Ok(objects)
     }
 
     /// Deletes an object by giving it a tombstone. It can be restored from
     /// version history; the object stays in the store until sync purges it.
     pub fn delete(&self, id: Uuid) -> Result<(), StoreError> {
-        let object_type = {
+        self.delete_batch([id])?;
+        Ok(())
+    }
+
+    /// Tombstones several objects in one transaction.
+    pub fn delete_batch<I>(&self, ids: I) -> Result<(), StoreError>
+    where
+        I: IntoIterator<Item = Uuid>,
+    {
+        let ids = ids.into_iter().collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let changes = {
             let mut conn = self.conn();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let mut object = read_object(&tx, id)?.ok_or(StoreError::NotFound(id))?;
-            let clock = next_clock(&tx)?;
-            let mut deletion = object.clone();
-            deletion.set_tombstone(Some(Tombstone::new(clock, self.device_id)?));
-            object = scoplen_model::merge(&object, &deletion)?;
-            store_object(&tx, &object, None)?;
+            let mut changed = Vec::with_capacity(ids.len());
+            for id in ids {
+                let object = read_object(&tx, id)?.ok_or(StoreError::NotFound(id))?;
+                let clock = next_clock(&tx)?;
+                let mut deletion = object.clone();
+                deletion.set_tombstone(Some(Tombstone::new(clock, self.device_id)?));
+                let deleted = scoplen_model::merge(&object, &deletion)?;
+                store_object(&tx, &deleted, None)?;
+                changed.push((deleted.object_type, id));
+            }
             tx.commit()?;
-            object.object_type
+            grouped_changes_from_pairs(changed)
         };
-        self.notify(&Change { object_type, ids: vec![id] });
+        for change in changes {
+            self.notify(&change);
+        }
+        Ok(())
+    }
+
+    /// Restores several tombstoned objects in one transaction.
+    ///
+    /// A fresh write to the first field makes the restoration a normal model
+    /// merge, so it also propagates correctly when sync is enabled.
+    pub fn restore_batch<I>(&self, ids: I) -> Result<(), StoreError>
+    where
+        I: IntoIterator<Item = Uuid>,
+    {
+        let ids = ids.into_iter().collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let changes = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut changed = Vec::with_capacity(ids.len());
+            for id in ids {
+                let object = read_object(&tx, id)?.ok_or(StoreError::NotFound(id))?;
+                if object.is_tombstoned() {
+                    let (path, value) = object
+                        .fields
+                        .iter()
+                        .next()
+                        .map(|(path, entry)| (path.clone(), entry.value.clone()))
+                        .ok_or(StoreError::NotFound(id))?;
+                    let clock = next_clock(&tx)?;
+                    let mut restoration = object.clone();
+                    restoration.insert(path, FieldEntry::new(value, clock, self.device_id)?)?;
+                    let restored = scoplen_model::merge(&object, &restoration)?;
+                    store_object(&tx, &restored, None)?;
+                    changed.push((restored.object_type, id));
+                }
+            }
+            tx.commit()?;
+            grouped_changes_from_pairs(changed)
+        };
+        for change in changes {
+            self.notify(&change);
+        }
         Ok(())
     }
 
@@ -289,6 +372,89 @@ impl Store {
             listener(change);
         }
     }
+}
+
+fn apply_write(
+    conn: &rusqlite::Transaction<'_>,
+    device_id: Uuid,
+    write: LocalWrite,
+) -> Result<Object, StoreError> {
+    let object_type = write.object_type;
+    let existing = match write.id {
+        Some(id) => Some(read_object(conn, id)?.ok_or(StoreError::NotFound(id))?),
+        None => None,
+    };
+    let id = match write.id {
+        Some(id) => id,
+        None => scoplen_model::new_uuid_v7()?,
+    };
+    apply_fields(conn, device_id, existing, id, object_type, write.fields)
+}
+
+fn apply_create(
+    conn: &rusqlite::Transaction<'_>,
+    device_id: Uuid,
+    create: NewObject,
+) -> Result<Object, StoreError> {
+    if read_object(conn, create.id)?.is_some() {
+        return Err(StoreError::AlreadyExists(create.id));
+    }
+    apply_fields(conn, device_id, None, create.id, create.object_type, create.fields)
+}
+
+fn apply_fields(
+    conn: &rusqlite::Transaction<'_>,
+    device_id: Uuid,
+    existing: Option<Object>,
+    id: Uuid,
+    object_type: ObjectType,
+    fields: Vec<(FieldPath, cbor::Value)>,
+) -> Result<Object, StoreError> {
+    let clock = next_clock(conn)?;
+    // The written version is the stored object with the new entries applied;
+    // merging it with the stored version applies the model's merge rules.
+    let mut written = match &existing {
+        Some(stored) => stored.clone(),
+        None => Object::new(id, object_type, scoplen_model::CURRENT_SCHEMA_VERSION)?,
+    };
+    if written.object_type != object_type {
+        return Err(StoreError::Merge(MergeError::TypeMismatch {
+            local: written.object_type,
+            remote: object_type,
+        }));
+    }
+    for (path, value) in fields {
+        written.insert(path, FieldEntry::new(value, clock, device_id)?)?;
+    }
+    let merged = match &existing {
+        Some(stored) => scoplen_model::merge(stored, &written)?,
+        None => {
+            written.validate()?;
+            ensure_vault_capacity(conn, None)?;
+            written
+        }
+    };
+    store_object(conn, &merged, None)?;
+    Ok(merged)
+}
+
+fn grouped_changes(objects: &[Object]) -> Vec<Change> {
+    grouped_changes_from_pairs(objects.iter().map(|object| (object.object_type, object.id)))
+}
+
+fn grouped_changes_from_pairs<I>(pairs: I) -> Vec<Change>
+where
+    I: IntoIterator<Item = (ObjectType, Uuid)>,
+{
+    let mut changes: Vec<Change> = Vec::new();
+    for (object_type, id) in pairs {
+        if let Some(change) = changes.iter_mut().find(|change| change.object_type == object_type) {
+            change.ids.push(id);
+        } else {
+            changes.push(Change { object_type, ids: vec![id] });
+        }
+    }
+    changes
 }
 
 fn apply_key(conn: &Connection, key: &LocalDatabaseKey) -> Result<(), StoreError> {

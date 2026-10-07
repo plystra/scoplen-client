@@ -7,6 +7,7 @@
 pub mod commands;
 pub mod events;
 pub mod frames;
+pub mod inventory;
 pub mod local_data;
 mod smoke;
 mod window_state;
@@ -24,6 +25,15 @@ pub fn ipc() -> Builder<tauri::Wry> {
         .commands(collect_commands![
             commands::app_info,
             commands::shell_ready,
+            inventory::inventory_areas,
+            inventory::inventory_groups,
+            inventory::inventory_hosts,
+            inventory::inventory_host,
+            inventory::inventory_add_host,
+            inventory::inventory_set_favorite,
+            inventory::inventory_delete_host,
+            inventory::inventory_undo_delete,
+            inventory::choose_key_file,
             local_data::local_data_status,
             local_data::unlock_local_data,
             local_data::create_local_passphrase,
@@ -45,6 +55,7 @@ pub fn run() {
     let ipc = ipc();
     let smoke = smoke::SmokeTest::from_env();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(smoke)
         .invoke_handler(ipc.invoke_handler())
         .setup(move |app| {
@@ -63,6 +74,7 @@ pub fn run() {
                 window_state::restore(&window, &store);
             }
             app.manage(local);
+            app.manage(inventory::InventoryState::default());
             Ok(())
         })
         .on_window_event(|window, event| {
