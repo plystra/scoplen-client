@@ -8,8 +8,8 @@ use crate::events::{SessionChangeKind, SessionChanged};
 use crate::local_data::LocalDataState;
 use scoplen_client_core::inventory::{
     AccessProfileInput, AccessProfileSummary, AddHostError, Areas, CredentialInput,
-    CredentialSummary, Deletion, DeletionStore, EditHost, EditHostError, Failure, GroupError,
-    GroupInput, GroupSummary, HostDetails, HostSource, HostSummary, Inventory, NewHost,
+    CredentialSummary, Deletion, DeletionStore, EditHost, EditHostError, Failure, ForwardSummary,
+    GroupError, GroupInput, GroupSummary, HostDetails, HostSource, HostSummary, Inventory, NewHost,
     ObjectEditError, OpenSshImportError, OpenSshImportPreview, OpenSshImportResult, RecentSession,
     RecentSessionKind, RecentSessionOutcome, RouteInput, RouteSummary, SessionError,
 };
@@ -287,6 +287,22 @@ pub async fn inventory_access_profiles(
         .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
     let inventory = Inventory::with_deletions(store, state.deletions.clone());
     tauri::async_runtime::spawn_blocking(move || inventory.access_profiles())
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Lists saved tunnels that can be attached to an access profile.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_forwards(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+) -> Result<Vec<ForwardSummary>, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.forwards_objects())
         .await
         .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
 }

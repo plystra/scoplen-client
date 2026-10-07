@@ -30,6 +30,7 @@ import {
   type ObjectEditError as IpcObjectEditError,
   type RouteInput as IpcRouteInput,
   type RouteSummary as IpcRouteSummary,
+  type ForwardSummary as IpcForwardSummary,
   type RecentSessionKind as IpcRecentSessionKind,
   type RecentSessionOutcome as IpcRecentSessionOutcome,
   type SessionError as IpcSessionError,
@@ -59,6 +60,7 @@ import type {
   RecentSession,
   RouteInput,
   RouteSummary,
+  ForwardSummary,
   RecentSessionKind,
   RecentSessionOutcome,
   SessionError,
@@ -140,6 +142,10 @@ export function createInventoryApi(): InventoryApi {
       inventoryObjectOutcome(
         (await commands.inventoryAccessProfiles()) as Result<IpcAccessProfileSummary[], IpcObjectEditError>,
       ) as Outcome<AccessProfileSummary[], ObjectEditError>,
+    forwards: async () =>
+      inventoryObjectOutcome(
+        (await commands.inventoryForwards()) as Result<IpcForwardSummary[], IpcObjectEditError>,
+      ) as Outcome<ForwardSummary[], ObjectEditError>,
     createAccessProfile: async (input: AccessProfileInput) =>
       inventoryObjectOutcome(
         (await commands.inventoryCreateAccessProfile(input as IpcAccessProfileInput)) as Result<

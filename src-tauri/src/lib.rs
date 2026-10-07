@@ -47,6 +47,7 @@ pub fn ipc() -> Builder<tauri::Wry> {
             inventory::inventory_create_group,
             inventory::inventory_update_group,
             inventory::inventory_access_profiles,
+            inventory::inventory_forwards,
             inventory::inventory_create_access_profile,
             inventory::inventory_update_access_profile,
             inventory::inventory_delete_access_profile,

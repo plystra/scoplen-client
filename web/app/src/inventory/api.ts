@@ -153,6 +153,15 @@ export interface RouteInput {
   definition: RouteDefinition;
 }
 
+export type ForwardKind = "local" | "remote" | "dynamic";
+
+export interface ForwardSummary {
+  id: Id;
+  name: string;
+  kind: ForwardKind;
+  profile: Id | null;
+}
+
 export interface AccessProfileSummary {
   id: Id;
   host: Id;
@@ -166,6 +175,7 @@ export interface AccessProfileSummary {
   terminalProfile: string | null;
   startupCommand: string | null;
   agentForwarding: boolean;
+  forwards: Id[];
   isDefault: boolean;
   orphaned: boolean;
   restored: boolean;
@@ -180,6 +190,7 @@ export interface AccessProfileInput {
   terminalProfile: string | null;
   startupCommand: string | null;
   agentForwarding: boolean;
+  forwards: Id[];
   defaultProfile: boolean;
 }
 
@@ -357,6 +368,7 @@ export interface InventoryApi {
   createGroup(group: GroupInput): Promise<Outcome<GroupSummary, GroupError>>;
   updateGroup(id: Id, group: GroupInput): Promise<Outcome<GroupSummary, GroupError>>;
   accessProfiles(): Promise<Outcome<AccessProfileSummary[], ObjectEditError>>;
+  forwards(): Promise<Outcome<ForwardSummary[], ObjectEditError>>;
   createAccessProfile(profile: AccessProfileInput): Promise<Outcome<AccessProfileSummary, ObjectEditError>>;
   updateAccessProfile(id: Id, profile: AccessProfileInput): Promise<Outcome<AccessProfileSummary, ObjectEditError>>;
   deleteAccessProfile(id: Id): Promise<Outcome<null, ObjectEditError>>;

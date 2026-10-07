@@ -82,6 +82,8 @@ export const commands = {
 	inventoryUpdateGroup: (id: string, group: GroupInput) => typedError<GroupSummary, GroupError>(__TAURI_INVOKE("inventory_update_group", { id, group })),
 	/**  Lists independent access profiles with redacted references. */
 	inventoryAccessProfiles: () => typedError<AccessProfileSummary[], ObjectEditError>(__TAURI_INVOKE("inventory_access_profiles")),
+	/**  Lists saved tunnels that can be attached to an access profile. */
+	inventoryForwards: () => typedError<ForwardSummary[], ObjectEditError>(__TAURI_INVOKE("inventory_forwards")),
 	/**  Creates an independent access profile. */
 	inventoryCreateAccessProfile: (profile: AccessProfileInput) => typedError<AccessProfileSummary, ObjectEditError>(__TAURI_INVOKE("inventory_create_access_profile", { profile })),
 	/**  Replaces an independent access profile. */
@@ -165,6 +167,8 @@ export type AccessProfileInput = {
 	startupCommand: string | null,
 	/**  Agent forwarding toggle. */
 	agentForwarding: boolean,
+	/**  Complete replacement for saved tunnels started with this login. */
+	forwards: string[],
 	/**  Make this the host's default profile. */
 	defaultProfile: boolean,
 };
@@ -195,6 +199,8 @@ export type AccessProfileSummary = {
 	startupCommand: string | null,
 	/**  Whether agent forwarding is enabled. */
 	agentForwarding: boolean,
+	/**  Saved tunnels started automatically with this login. */
+	forwards: string[],
 	/**  Whether this is the host's default profile. */
 	isDefault: boolean,
 	/**  Whether one of this profile's referenced objects is missing or deleted. */
@@ -430,6 +436,27 @@ export type Failure =
 { kind: "failed";
 /**  A diagnostic reference safe to show for retryable failures. */
 reference: string };
+
+/**  The direction of a saved tunnel. */
+export type ForwardKindInput =
+/**  Listen locally and connect to the remote target. */
+"local" |
+/**  Listen remotely and connect back to the local target. */
+"remote" |
+/**  Listen locally as a SOCKS proxy. */
+"dynamic";
+
+/**  A redacted saved tunnel that can be attached to an access profile. */
+export type ForwardSummary = {
+	/**  The tunnel identifier. */
+	id: string,
+	/**  Display name. */
+	name: string,
+	/**  Tunnel direction. */
+	kind: ForwardKindInput,
+	/**  The optional default profile configured on the tunnel. */
+	profile: string | null,
+};
 
 /**  Why creating or editing a group failed. No group is changed for failures. */
 export type GroupError =

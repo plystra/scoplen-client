@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { sampleHosts, sampleInventory } from "../src/gallery/sample-inventory";
 import { I18nProvider } from "../src/i18n";
@@ -101,5 +101,40 @@ describe("independent inventory objects", () => {
     expect(await screen.findByText("Referenced object restored")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Orphaned items" })).toBeNull();
     expect((await screen.findAllByText("deploy@prod-api-01")).length).toBeGreaterThan(0);
+  });
+
+  it("edits the tunnels attached to a login and preserves the selection", async () => {
+    const api = sampleInventory(sampleHosts());
+    show(api, "logins");
+    expect((await screen.findAllByText("dba@prod-db-01")).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Edit dba@prod-db-01" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit dba" });
+    const postgres = within(dialog).getByRole("checkbox", { name: /postgres-prod/ });
+    const socks = within(dialog).getByRole("checkbox", { name: /staging-socks/ });
+    expect((postgres as HTMLInputElement).checked).toBe(true);
+    expect((socks as HTMLInputElement).checked).toBe(false);
+    await userEvent.click(postgres);
+    await userEvent.click(socks);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit dba@prod-db-01" }));
+    const reopened = await screen.findByRole("dialog", { name: "Edit dba" });
+    expect((within(reopened).getByRole("checkbox", { name: /postgres-prod/ }) as HTMLInputElement).checked).toBe(false);
+    expect((within(reopened).getByRole("checkbox", { name: /staging-socks/ }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("keeps profile editing blocked when tunnel inventory cannot be loaded", async () => {
+    const api = sampleInventory(sampleHosts());
+    api.forwards = async () => ({
+      status: "error",
+      error: { kind: "failed", reference: "forward store unavailable" },
+    });
+    show(api, "logins");
+    expect((await screen.findAllByText("dba@prod-db-01")).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Edit dba@prod-db-01" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit dba" });
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("forward store unavailable");
+    expect(within(dialog).getByRole("button", { name: "Save changes" }).hasAttribute("disabled")).toBe(true);
   });
 });
