@@ -8,8 +8,11 @@ import { InventoryContext } from "./inventory/api";
 import { createInventoryApi } from "./inventory/core-api";
 import { InventoryObjects, type ObjectSection } from "./inventory/objects";
 import { PassphraseSettings } from "./local-data";
+import { SessionTerminal } from "./session";
 
 type View = "hosts" | "objects" | "settings";
+
+type OpenSession = { id: string; profileId: string; label: string };
 
 /** The application once its local data is open. */
 export function Shell({
@@ -24,19 +27,42 @@ export function Shell({
   const { t } = useI18n();
   const [view, setView] = useState<View>("hosts");
   const [objectSection, setObjectSection] = useState<ObjectSection>("logins");
+  const [sessions, setSessions] = useState<OpenSession[]>([]);
+  const [activeTab, setActiveTab] = useState("hosts");
   const inventory = useMemo(() => createInventoryApi(), []);
 
   const openObjects = (section: ObjectSection) => {
     setObjectSection(section);
     setView("objects");
+    setActiveTab("hosts");
   };
+
+  const openSession = (profileId: string, label: string) => {
+    const id = `session-${Date.now()}-${sessions.length}`;
+    setSessions((current) => [...current, { id, profileId, label }]);
+    setActiveTab(id);
+    setView("hosts");
+  };
+
+  const closeSession = (id: string) => {
+    setSessions((current) => current.filter((session) => session.id !== id));
+    setActiveTab("hosts");
+  };
+
+  const tabs = [
+    { id: "hosts", label: t("frame.hosts") },
+    ...sessions.map((session) => ({ id: session.id, label: session.label })),
+  ];
 
   return (
     <Frame
       platform={info.platform}
-      tabs={[{ id: "hosts", label: t("frame.hosts") }]}
-      active="hosts"
-      onTab={() => setView("hosts")}
+      tabs={tabs}
+      active={activeTab}
+      onTab={(id) => {
+        setActiveTab(id);
+        setView("hosts");
+      }}
       onSettings={() => setView(view === "settings" ? "hosts" : "settings")}
       settingsActive={view === "settings"}
     >
@@ -44,6 +70,18 @@ export function Shell({
         <main id="main" tabIndex={-1} className="mx-auto max-w-xl px-6 py-10 focus:outline-none">
           <Settings status={status} onStatus={onStatus} />
         </main>
+      ) : activeTab !== "hosts" ? (
+        <div className="h-full min-h-0">
+          {sessions.map((session) => (
+            <div key={session.id} className="h-full min-h-0" hidden={session.id !== activeTab}>
+              <SessionTerminal
+                profileId={session.profileId}
+                label={session.label}
+                onClose={() => closeSession(session.id)}
+              />
+            </div>
+          ))}
+        </div>
       ) : view === "objects" ? (
         <InventoryContext.Provider value={inventory}>
           <InventoryObjects section={objectSection} onBack={() => setView("hosts")} />
@@ -51,7 +89,7 @@ export function Shell({
       ) : (
         <InventoryContext.Provider value={inventory}>
           <main id="main" tabIndex={-1} className="h-full min-h-0 focus:outline-none">
-            <HostsHome onOpenObjects={openObjects} />
+            <HostsHome onOpenObjects={openObjects} onConnect={openSession} />
           </main>
         </InventoryContext.Provider>
       )}

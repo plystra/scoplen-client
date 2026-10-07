@@ -7,11 +7,15 @@ import { InventoryContext, type InventoryApi } from "../src/inventory/api";
 import { HostsHome } from "../src/inventory/home";
 import { violations } from "../../ui/test/axe";
 
-function show(api: InventoryApi, locale: "en" | "zh-Hans" = "en") {
+function show(
+  api: InventoryApi,
+  locale: "en" | "zh-Hans" = "en",
+  onConnect?: (profileId: string, label: string) => void,
+) {
   return render(
     <I18nProvider locale={locale}>
       <InventoryContext.Provider value={api}>
-        <HostsHome />
+        <HostsHome onConnect={onConnect} />
       </InventoryContext.Provider>
     </I18nProvider>,
   );
@@ -103,6 +107,17 @@ describe("the host list", () => {
     expect(await screen.findByRole("heading", { level: 2, name: "prod-db-01" })).toBeTruthy();
     expect(screen.getByText("Key laptop · Through prod-jump")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Copy public key" })).toBeTruthy();
+  });
+
+  it("offers a connection entry for each saved login", async () => {
+    const onConnect = vi.fn();
+    show(sampleInventory(sampleHosts()), "en", onConnect);
+    await screen.findByText("7 hosts");
+    await userEvent.click(within(list()).getByText("prod-api-01"));
+    const connect = await screen.findAllByRole("button", { name: "Connect" });
+    expect(connect).toHaveLength(2);
+    await userEvent.click(connect[0]!);
+    expect(onConnect).toHaveBeenCalledWith("l-1", "prod-api-01 · deploy");
   });
 
   it("explains an empty inventory and a failure to load", async () => {

@@ -23,7 +23,13 @@ import { useLoad, type Loaded } from "./use-load";
 type Toast = { message: string; undo?: string } | null;
 
 /** The Hosts tab: where the inventory is, and the way into every session. */
-export function HostsHome({ onOpenObjects }: { onOpenObjects?: (section: ObjectSection) => void } = {}) {
+export function HostsHome({
+  onOpenObjects,
+  onConnect,
+}: {
+  onOpenObjects?: (section: ObjectSection) => void;
+  onConnect?: (profileId: Id, label: string) => void;
+} = {}) {
   const { t } = useI18n();
   const api = useInventory();
   const [source, setSource] = useState<HostSource>({ kind: "all" });
@@ -256,6 +262,7 @@ export function HostsHome({ onOpenObjects }: { onOpenObjects?: (section: ObjectS
           groups={groupList}
           onClose={() => setSelected(null)}
           onDelete={(host) => setDeleting(host)}
+          onConnect={onConnect}
         />
       ) : null}
 

@@ -23,11 +23,13 @@ export function HostDetailsPanel({
   groups,
   onClose,
   onDelete,
+  onConnect,
 }: {
   id: Id;
   groups: GroupSummary[];
   onClose: () => void;
   onDelete: (host: HostDetails) => void;
+  onConnect?: (profileId: Id, label: string) => void;
 }) {
   const { t } = useI18n();
   const api = useInventory();
@@ -71,7 +73,9 @@ export function HostDetailsPanel({
         {details.state === "ready" && details.data === null ? (
           <p className="text-sm text-muted-foreground">{t("host.missing")}</p>
         ) : null}
-        {details.state === "ready" && details.data ? <Body host={details.data} groups={groups} /> : null}
+        {details.state === "ready" && details.data ? (
+          <Body host={details.data} groups={groups} onConnect={onConnect} />
+        ) : null}
       </div>
 
       {details.state === "ready" && details.data ? (
@@ -419,7 +423,15 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Body({ host, groups }: { host: HostDetails; groups: GroupSummary[] }) {
+function Body({
+  host,
+  groups,
+  onConnect,
+}: {
+  host: HostDetails;
+  groups: GroupSummary[];
+  onConnect?: (profileId: Id, label: string) => void;
+}) {
   const { t } = useI18n();
   const tags = Object.entries(host.tags);
   const memberOf = groups.filter((g) => host.groups.includes(g.id));
@@ -428,14 +440,14 @@ function Body({ host, groups }: { host: HostDetails; groups: GroupSummary[] }) {
     <>
       {host.logins.length === 1 ? (
         <Section title={t("host.login")}>
-          <LoginLine login={host.logins[0]!} />
+          <LoginLine login={host.logins[0]!} hostName={host.name} onConnect={onConnect} />
         </Section>
       ) : host.logins.length > 1 ? (
         <Section title={t("host.logins")}>
           <ul className="m-0 flex list-none flex-col gap-3 p-0">
             {host.logins.map((login) => (
               <li key={login.id}>
-                <LoginLine login={login} />
+                <LoginLine login={login} hostName={host.name} onConnect={onConnect} />
               </li>
             ))}
           </ul>
@@ -467,16 +479,32 @@ function Body({ host, groups }: { host: HostDetails; groups: GroupSummary[] }) {
   );
 }
 
-function LoginLine({ login }: { login: LoginSummary }) {
+function LoginLine({
+  login,
+  hostName,
+  onConnect,
+}: {
+  login: LoginSummary;
+  hostName: string;
+  onConnect?: (profileId: Id, label: string) => void;
+}) {
   const { t } = useI18n();
+  const label = `${hostName} · ${login.name ?? login.username}`;
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="flex items-center gap-2">
-        <span className="font-mono text-sm">{login.name ?? login.username}</span>
-        {login.isDefault && login.name ? (
-          <span className="text-xs text-muted-foreground">{t("host.default")}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono text-sm">{login.name ?? login.username}</span>
+          {login.isDefault && login.name ? (
+            <span className="shrink-0 text-xs text-muted-foreground">{t("host.default")}</span>
+          ) : null}
+        </span>
+        {onConnect ? (
+          <Button variant="primary" className="h-8 shrink-0 px-3 text-xs" onClick={() => onConnect(login.id, label)}>
+            {t("session.connect")}
+          </Button>
         ) : null}
-      </span>
+      </div>
       <span className="text-xs text-muted-foreground">
         {credentialText(t, login.credential)} · {routeText(t, login.route)}
       </span>

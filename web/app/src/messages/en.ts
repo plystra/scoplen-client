@@ -12,7 +12,7 @@ export const en = {
   "about.summary": "An SSH client and bastion, fully self-hosted.",
   "about.version": "Version {version} for {platform, select, macos {macOS} windows {Windows} other {this system}}",
   "about.maturity":
-    "Maturity: Exploration. This build stores its data encrypted on this device; it does not connect to hosts yet.",
+    "Maturity: Exploration. This build stores its data encrypted on this device and can open direct SSH sessions.",
   "about.project": "Scoplen is a Plystra project.",
   "about.license": "The client is open source under the Apache License 2.0.",
 
@@ -78,6 +78,14 @@ export const en = {
   "frame.tabs": "Open tabs",
   "frame.settings": "Settings",
   "frame.hosts": "Hosts",
+  "session.connect": "Connect",
+  "session.connecting": "Connecting",
+  "session.connected": "Connected",
+  "session.closed": "Session closed",
+  "session.failed": "Connection failed",
+  "session.close": "Close session",
+  "session.output": "Terminal output",
+  "session.waiting": "Waiting for terminal output…",
   "hosts.title": "My hosts",
   "hosts.favorites": "Favorites",
   "hosts.recent": "Recent",
