@@ -7,7 +7,10 @@
 //! handshake, while this crate owns local object resolution, device-local
 //! credential material, trust decisions, and the live direct-session owner.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use base64::{
     Engine as _,
@@ -240,6 +243,35 @@ pub enum HostKeyStatus {
     Changed,
 }
 
+/// The display-safe identity of a host key presented during SSH key exchange.
+///
+/// `key` is the complete OpenSSH public-key text (`algorithm base64(blob)`) and
+/// `fingerprint` is the OpenSSH SHA-256 fingerprint of the same blob. Neither
+/// field contains private key material.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostKeyPresentation {
+    /// The SSH host-key algorithm identifier.
+    pub algorithm: String,
+    /// The complete OpenSSH public-key text.
+    pub key: String,
+    /// The OpenSSH SHA-256 fingerprint.
+    pub fingerprint: String,
+}
+
+impl HostKeyPresentation {
+    /// Render a validated shared-engine host key for display and trust storage.
+    #[must_use]
+    pub fn from_host_key(key: &HostKey) -> Self {
+        let (algorithm, blob) = match key {
+            HostKey::Raw { algorithm, key_blob } => (algorithm.as_str(), key_blob.as_slice()),
+            HostKey::Certificate(certificate) => (certificate.algorithm(), certificate.as_bytes()),
+        };
+        let encoded = STANDARD.encode(blob);
+        let fingerprint = format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(blob)));
+        Self { algorithm: algorithm.to_owned(), key: format!("{algorithm} {encoded}"), fingerprint }
+    }
+}
+
 /// Evaluate a presented host key without accepting or writing it.
 ///
 /// Wildcard patterns are intentionally ignored here until the C10 OpenSSH
@@ -262,6 +294,41 @@ pub fn evaluate_host_key(
         }
     }
     if found { HostKeyStatus::Changed } else { HostKeyStatus::New }
+}
+
+/// Probe the server's validated host key without making a trust decision.
+///
+/// The probe accepts the key only for the lifetime of this connection, captures
+/// its canonical display form, then disconnects immediately. Callers must still
+/// compare the result with local records and require explicit confirmation for
+/// new or changed keys before opening an authenticated session.
+pub async fn probe_host_key(
+    plan: &ConnectionPlan,
+) -> Result<HostKeyPresentation, SshConnectionError> {
+    if !matches!(&plan.route, ConnectionRoute::Direct) {
+        return Err(SshConnectionError::UnsupportedRoute);
+    }
+
+    let presented = Arc::new(Mutex::new(None::<HostKeyPresentation>));
+    let capture = Arc::clone(&presented);
+    let config =
+        ClientConfig::new(plan.address.clone(), plan.port, move |_host: &str, key: &HostKey| {
+            let Ok(mut slot) = capture.lock() else {
+                return Err(HostKeyVerificationError::Rejected(
+                    "host-key probe could not capture the presented key".to_owned(),
+                ));
+            };
+            *slot = Some(HostKeyPresentation::from_host_key(key));
+            Ok(())
+        })
+        .map_err(ClientError::from)?;
+    let connection = ClientConnection::connect(config).await?;
+    connection.disconnect().await?;
+    presented
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .ok_or(SshConnectionError::HostKeyProbeMissing)
 }
 
 /// Resolve one AccessProfile from the encrypted local store.
@@ -495,6 +562,9 @@ pub enum SshConnectionError {
     /// The saved credential cannot be used by this concrete engine slice.
     #[error("SSH credential kind is not supported by the concrete client engine")]
     UnsupportedCredential,
+    /// The peer completed key exchange without a key callback result.
+    #[error("SSH server did not present a host key")]
+    HostKeyProbeMissing,
     /// Supplied command or channel input exceeded its bound.
     #[error("SSH {field} exceeds the {limit}-byte limit")]
     InputTooLarge {
@@ -900,6 +970,21 @@ mod tests {
             ),
             Err(HostKeyVerificationError::Rejected(_))
         ));
+    }
+
+    #[test]
+    fn host_key_presentation_is_canonical_and_fingerprint_bound() {
+        let blob = [1_u8, 2, 3, 4];
+        let presentation = HostKeyPresentation::from_host_key(&HostKey::Raw {
+            algorithm: "ssh-test".into(),
+            key_blob: blob.to_vec(),
+        });
+        assert_eq!(presentation.algorithm, "ssh-test");
+        assert_eq!(presentation.key, format!("ssh-test {}", STANDARD.encode(blob)));
+        assert_eq!(
+            presentation.fingerprint,
+            format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(blob)))
+        );
     }
 
     #[test]

@@ -13,6 +13,23 @@ export const commands = {
 	/**  Called by the frontend once its first screen has rendered. */
 	shellReady: () => __TAURI_INVOKE<void>("shell_ready"),
 	/**
+	 *  Probe and classify the SSH host key before opening an authenticated session.
+	 *
+	 *  New and changed keys are returned to the frontend for explicit confirmation;
+	 *  this command never writes a trust record and never accepts a key for a later
+	 *  connection by itself.
+	 */
+	sessionHostKey: (profileId: string) => typedError<HostKeyDetails, string>(__TAURI_INVOKE("session_host_key", { profileId })),
+	/**
+	 *  Trust a previously displayed host key after probing it again.
+	 *
+	 *  The expected values bind the confirmation to the exact probe shown to the
+	 *  user. A changed value aborts without writing anything. Older active direct
+	 *  key records for the Host are revoked before the new manual record is
+	 *  created, so a key rotation cannot leave two different keys trusted at once.
+	 */
+	sessionTrustHostKey: (profileId: string, algorithm: string, key: string, fingerprint: string) => typedError<null, string>(__TAURI_INVOKE("session_trust_host_key", { profileId, algorithm, key, fingerprint })),
+	/**
 	 *  Connects one direct password profile and streams its exec or shell output.
 	 *
 	 *  Host-key verification uses active, host-specific trust records and remains
@@ -448,6 +465,27 @@ export type HostDetails = {
 	/**  All logins for this host. */
 	logins: LoginSummary[],
 } & HostSummary;
+
+/**  A validated host key suitable for a confirmation dialog. */
+export type HostKeyDetails = {
+	/**  The SSH algorithm identifier. */
+	algorithm: string,
+	/**  The complete OpenSSH public-key text. */
+	key: string,
+	/**  The OpenSSH SHA-256 fingerprint. */
+	fingerprint: string,
+	/**  How the key relates to the local Host trust records. */
+	status: HostKeyTrustStatus,
+};
+
+/**  The result of comparing the probed key with this Host's active trust records. */
+export type HostKeyTrustStatus =
+/**  The key already matches an active host-specific trust record. */
+"trusted" |
+/**  No active host-specific key exists yet. */
+"new" |
+/**  An active host-specific key exists, but it does not match. */
+"changed";
 
 /**  Which hosts to list. */
 export type HostSource =
