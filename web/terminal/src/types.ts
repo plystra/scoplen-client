@@ -1,8 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 /* eslint-disable @typescript-eslint/no-invalid-void-type */
 
+import type { ITheme, FontWeight } from "@xterm/xterm";
+
 /** A chunk crossing the terminal boundary is always binary. */
 export type TerminalBytes = Uint8Array;
+
+/** The user-facing terminal settings that can be applied without a session. */
+export interface TerminalProfile {
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: FontWeight;
+  fontWeightBold?: FontWeight;
+  cursorBlink?: boolean;
+  cursorStyle?: "block" | "underline" | "bar";
+  cursorInactiveStyle?: "outline" | "block" | "bar" | "underline" | "none";
+  scrollback?: number;
+  theme?: ITheme;
+}
+
+/** Clipboard operations are injected so browser and desktop hosts can apply their own policy. */
+export interface TerminalClipboard {
+  readText?(): Promise<string>;
+  writeText?(text: string): Promise<void>;
+}
+
+export type TerminalBroadcastConfirmation = () => boolean | Promise<boolean>;
 
 export interface TerminalSubscription {
   unsubscribe(): void;
@@ -36,6 +59,8 @@ export type TerminalSink =
 
 export interface TerminalElementEventMap {
   "terminal-input": CustomEvent<TerminalBytes>;
+  "terminal-broadcast-input": CustomEvent<TerminalBytes>;
+  "terminal-broadcast-state": CustomEvent<boolean>;
   "terminal-output": CustomEvent<TerminalBytes>;
   "terminal-error": CustomEvent<TerminalError>;
   "terminal-complete": Event;

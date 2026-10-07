@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { render, act } from "@testing-library/react";
+import { createRef } from "react";
 import { Terminal } from "../src/react";
-import type { TerminalBytes } from "../src";
+import type { ScoplenTerminalElement } from "../src";
+import type { TerminalBytes, TerminalClipboard, TerminalSink } from "../src";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -43,5 +45,38 @@ describe("Terminal React binding", () => {
     expect(writes).toEqual([[120]]);
     view.unmount();
     expect(cancelled).toBe(1);
+  });
+
+  it("passes profile, clipboard, broadcast sink, and broadcast events", async () => {
+    const ref = createRef<ScoplenTerminalElement>();
+    const primary: number[][] = [];
+    const broadcast: number[][] = [];
+    const clipboard: TerminalClipboard = { readText: async () => "unused" };
+    const broadcastSink: TerminalSink = (bytes) => {
+      broadcast.push([...bytes]);
+    };
+    const states: boolean[] = [];
+    render(
+      <Terminal
+        ref={ref}
+        sink={(bytes) => {
+          primary.push([...bytes]);
+        }}
+        broadcastSink={broadcastSink}
+        clipboard={clipboard}
+        profile={{ scrollback: 12 }}
+        onTerminalBroadcastState={(enabled) => states.push(enabled)}
+      />,
+    );
+
+    await act(async () => {
+      await ref.current?.setBroadcastInput(true, () => true);
+      await ref.current?.send(new Uint8Array([9]));
+    });
+    expect(ref.current?.profile.scrollback).toBe(12);
+    expect(ref.current?.clipboard).toBe(clipboard);
+    expect(primary).toEqual([[9]]);
+    expect(broadcast).toEqual([[9]]);
+    expect(states).toEqual([true]);
   });
 });
