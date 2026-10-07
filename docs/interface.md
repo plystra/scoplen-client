@@ -33,6 +33,20 @@ Contract: `web/app/src/inventory/api.ts` (`InventoryApi`). Screens: `inventory/h
 | `importOpenSshConfig(preview)` | Available only while the host inventory is empty. Re-reads the source and rejects a changed preview, validates every host and identity file, then writes all importable hosts as one transaction. It returns imported hosts and the skip report; on an expected error, nothing is written. The source file is never modified. |
 | `onChange(listener)` | Calls the listener after any inventory change; built on the `storeChanged` event (`ipc/store-events.ts`). |
 
+The independent object editor uses the same `InventoryApi` boundary for the
+objects that tier-0 creates implicitly:
+
+| Operation | What the core does |
+| --- | --- |
+| `accessProfiles()` / `createAccessProfile()` / `updateAccessProfile()` / `deleteAccessProfile()` | Lists and edits AccessProfiles with host, Credential, and Route references validated before a write. Updating a default changes the Host default in the same store transaction; deleting the default or a profile used by a Forward is refused. |
+| `credentials()` / `createCredential()` / `updateCredential()` / `deleteCredential()` | Lists and edits Credentials with kind and binding validation. Shared password and private-key material is accepted only on writes and is stored through the encrypted secret path; read DTOs expose only `hasSecret`. A credential referenced by a profile or proxy route cannot be deleted. |
+| `routes()` / `createRoute()` / `updateRoute()` / `deleteRoute()` | Lists and edits reusable local Routes, validating jump profile and proxy credential references and endpoint shapes. Managed routes are display-only on the device, and routes referenced by a profile cannot be deleted. |
+
+These operations return `ObjectEditError` on validation, reference, or
+in-use failures. The error reference is diagnostic text and never contains
+credential material. Independent object DTOs carry only redacted credential
+labels and usage counts; secrets never cross the IPC boundary.
+
 Every operation that can fail returns `Outcome`; a `Failure` carries a reference for support, free of secrets.
 
 The tier-0 OpenSSH importer accepts simple literal `Host` blocks with `HostName`, `User`, `Port`, and `IdentityFile` values. It skips a host block when a directive or value in that block cannot be represented. Global settings, wildcard `Host` patterns, `Include`, and `Match` can affect other blocks, so the preview excludes every host in those files and explains why. Full OpenSSH semantics, `known_hosts`, keys discovery, and idempotent re-import belong to roadmap C10; this flow is limited to an empty inventory.

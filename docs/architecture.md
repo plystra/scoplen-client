@@ -44,6 +44,15 @@ later C4 work.
 
 `repository` gives typed access to every object type of `04-object-model.md` §4. A record is a read view of a stored object; a change names only the fields it sets, with `Edit::Clear` writing `null` to clear an optional field (D-57) and map changes naming the entries to set or remove. Because a change touches only its own fields, fields this build does not know survive every write. Credential secrets are never part of a record: `credential_secret` reads one when a connection needs it, and a change containing a secret is redacted when formatted. Gateway networks are authored by the organization's server and are read-only on a device.
 
+The C3 independent-object facade builds on those typed records rather than
+letting the interface edit raw fields. AccessProfiles, Credentials, and local
+Routes have separate redacted DTOs and input validation. Profile creation or
+replacement and the Host default reference are committed together, while
+deletion checks Forward, profile, and route references first. Credential input
+material is wrapped in `SecretVec` and is never present in a result, debug
+representation, or IPC error. Managed Routes remain readable but reject local
+create, update, and delete operations until the organization client owns them.
+
 After every committed change the shell sends the frontend a `storeChanged` event with the type and identifiers of the changed objects; `useStoreChanges` (`web/app/src/ipc/store-events.ts`) subscribes to it. `LocalData` keeps the listener attached to whichever store is open, so events continue after unlocking or starting with empty data.
 
 `SQLCipher` is built with a vendored, statically linked OpenSSL on both platforms, so a build never links a system OpenSSL by accident.

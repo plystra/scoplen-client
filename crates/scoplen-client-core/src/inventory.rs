@@ -12,17 +12,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use scoplen_crypto::SecretVec;
+use scoplen_model::FieldPath;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
 
 use crate::repository::{
-    AccessProfile, Credential, CredentialBinding, CredentialKind, Edit, Host, HostChange,
-    HostGroup, HostGroupChange, RecordError, Repository, Route, RouteChoice, RouteKind,
-    credential_secret,
+    AccessProfile, AccessProfileChange, Change, Credential, CredentialBinding, CredentialChange,
+    CredentialKind, Edit, Forward, Host, HostChange, HostGroup, HostGroupChange, RecordError,
+    Repository, Route, RouteChange, RouteChoice, RouteKind, credential_secret,
 };
 use crate::store::device::{SESSION_HISTORY_LIMIT, SessionKind, SessionOutcome};
-use crate::store::{NewObject, Store, StoreError};
+use crate::store::{LocalWrite, NewObject, Store, StoreError};
 
 const UNDO_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const MAX_OPEN_SSH_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -250,6 +252,254 @@ pub struct GroupSummary {
     pub parent: Option<String>,
     /// Number of live hosts in the group.
     pub host_count: u32,
+}
+
+/// The kind of credential exposed by the independent object editor.
+///
+/// The wire names intentionally follow the object model while keeping the
+/// private key kind readable in the interface (the host details read model
+/// calls it `key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum CredentialKindInput {
+    /// A password stored in the encrypted shared object.
+    Password,
+    /// An OpenSSH private key.
+    Key,
+    /// An organization-issued certificate.
+    Certificate,
+    /// A system SSH agent.
+    Agent,
+    /// A hardware security key.
+    SecurityKey,
+    /// A non-exportable device key.
+    DeviceKey,
+    /// An external credential provider.
+    External,
+}
+
+/// Where a credential resolves its authentication material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum CredentialBindingInput {
+    /// Material is encrypted in the replicated object.
+    Shared,
+    /// Material is held by each device separately.
+    Device,
+    /// Material is resolved at connect time.
+    None,
+}
+
+/// A redacted credential object. The secret is represented only by
+/// `has_secret`; it is never returned over IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialSummary {
+    /// The credential identifier.
+    pub id: String,
+    /// The optional user-assigned name.
+    pub name: Option<String>,
+    /// The credential kind.
+    pub kind: CredentialKindInput,
+    /// The binding of its material.
+    pub binding: CredentialBindingInput,
+    /// Whether a shared secret is present; the secret itself is never exposed.
+    pub has_secret: bool,
+    /// The public half of a key, when one is available.
+    pub public_key: Option<String>,
+    /// Non-secret provider attributes.
+    pub provider: BTreeMap<String, String>,
+    /// Organization scope for a certificate, when present.
+    pub certificate_scope: Option<String>,
+    /// Number of access profiles that reference this credential.
+    pub profile_count: u32,
+    /// Number of routes that reference this credential.
+    pub route_count: u32,
+    /// Whether a later write resurrected this credential.
+    pub restored: bool,
+}
+
+/// Input for creating or replacing a credential description.
+///
+/// `secret` is accepted only for shared password/private-key credentials and
+/// is consumed by the core. It is not retained in any returned DTO.
+#[derive(Clone, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialInput {
+    /// Optional display name.
+    pub name: Option<String>,
+    /// The credential kind.
+    pub kind: CredentialKindInput,
+    /// Where the secret is resolved.
+    pub binding: CredentialBindingInput,
+    /// A shared password or private-key text. Never returned by the core.
+    pub secret: Option<String>,
+    /// Public key text for key and agent credentials.
+    pub public_key: Option<String>,
+    /// External provider reference fields (for example `type`, `path`, and
+    /// `field`). Values are descriptions and never provider secret material.
+    pub provider: BTreeMap<String, String>,
+    /// Organization id for a certificate credential.
+    pub certificate_scope: Option<String>,
+}
+
+/// A device-independent route definition. Managed routes are represented so
+/// that they can be displayed, but local editing rejects them until the
+/// organization client is available.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub enum RouteDefinition {
+    /// Ordered access profiles used as jump hosts.
+    Jump { hops: Vec<String> },
+    /// A SOCKS5 proxy at `host:port`.
+    Socks5 { proxy: String, credential: Option<String> },
+    /// An HTTP CONNECT proxy at `host:port`.
+    HttpConnect { proxy: String, credential: Option<String> },
+    /// A local OpenSSH `ProxyCommand`.
+    Command { command: String },
+    /// A managed gateway network, authored by the organization.
+    Managed { gateway_network: String },
+}
+
+/// A redacted Route object.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteSummary {
+    /// The route identifier.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Route-specific definition.
+    pub definition: RouteDefinition,
+    /// Number of access profiles that reference this route.
+    pub profile_count: u32,
+    /// Whether a later write resurrected this route.
+    pub restored: bool,
+}
+
+/// Input for creating or replacing a Route.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteInput {
+    /// Display name; it must not be empty.
+    pub name: String,
+    /// Route-specific definition.
+    pub definition: RouteDefinition,
+}
+
+/// A standalone access profile with its host and redacted references.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessProfileSummary {
+    /// The profile identifier.
+    pub id: String,
+    /// The required host identifier.
+    pub host: String,
+    /// The host display name, when the host is live.
+    pub host_name: Option<String>,
+    /// Optional profile name.
+    pub name: Option<String>,
+    /// Remote username.
+    pub username: String,
+    /// Credential reference, with no secret material.
+    pub credential: Option<CredentialLabel>,
+    /// Credential identifier, if selected.
+    pub credential_id: Option<String>,
+    /// Route label used by the host screens.
+    pub route: RouteLabel,
+    /// Route identifier, or `null` for direct.
+    pub route_id: Option<String>,
+    /// Local terminal profile name.
+    pub terminal_profile: Option<String>,
+    /// Command sent after authentication, when configured.
+    pub startup_command: Option<String>,
+    /// Whether agent forwarding is enabled.
+    pub agent_forwarding: bool,
+    /// Whether this is the host's default profile.
+    pub is_default: bool,
+    /// Whether a later write resurrected this profile.
+    pub restored: bool,
+}
+
+/// Input for creating or replacing an access profile.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessProfileInput {
+    /// Host identifier.
+    pub host: String,
+    /// Optional profile name.
+    pub name: Option<String>,
+    /// Remote username; it must not be empty.
+    pub username: String,
+    /// Credential identifier, or `null` to resolve any usable credential.
+    pub credential: Option<String>,
+    /// Route identifier, or `null` for direct access.
+    pub route: Option<String>,
+    /// Local terminal profile name.
+    pub terminal_profile: Option<String>,
+    /// Startup command.
+    pub startup_command: Option<String>,
+    /// Agent forwarding toggle.
+    pub agent_forwarding: bool,
+    /// Make this the host's default profile.
+    pub default_profile: bool,
+}
+
+/// Why an independent object edit failed. No operation writes anything for a
+/// validation error, and references are checked before a write begins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[allow(missing_docs)]
+pub enum ObjectEditError {
+    /// One of the supplied identifiers is not a UUID.
+    #[error("the {field} identifier is invalid")]
+    InvalidId { field: String },
+    /// A referenced or edited object does not exist.
+    #[error("the {entity} was not found")]
+    NotFound { entity: String },
+    /// A required name is empty.
+    #[error("the name is empty")]
+    EmptyName,
+    /// A required username is empty.
+    #[error("the username is empty")]
+    EmptyUsername,
+    /// A text field exceeds the object-model limit.
+    #[error("the {field} is too long")]
+    TextTooLong { field: String },
+    /// A profile references a credential of the wrong type or a missing one.
+    #[error("the credential reference is invalid")]
+    InvalidCredential,
+    /// A profile or route references a missing route/profile/host.
+    #[error("the route reference is invalid")]
+    InvalidRoute,
+    /// A proxy is not a valid host:port endpoint.
+    #[error("the proxy endpoint is invalid")]
+    InvalidProxy,
+    /// A route command is empty or exceeds the model limit.
+    #[error("the route command is invalid")]
+    InvalidCommand,
+    /// Kind and binding do not satisfy the object model.
+    #[error("the credential kind and binding are incompatible")]
+    InvalidCredentialBinding,
+    /// Shared password/private-key credentials require material on creation.
+    #[error("this shared credential requires a secret")]
+    SecretRequired,
+    /// A secret was supplied to a binding that must never store one.
+    #[error("this credential binding cannot contain a secret")]
+    SecretNotAllowed,
+    /// A route or credential is still referenced by another object.
+    #[error("the object is still in use")]
+    InUse,
+    /// A default profile cannot be deleted until another profile is selected.
+    #[error("the default profile must be changed before deletion")]
+    DefaultProfile,
+    /// Managed routes are organization-authored and unavailable locally.
+    #[error("managed routes are read-only on this device")]
+    ManagedRoute,
+    /// The local store or model failed without changing the requested object.
+    #[error("{reference}")]
+    Failed { reference: String },
 }
 
 /// The editable host metadata owned by the local inventory.
@@ -640,6 +890,563 @@ impl Inventory {
                     as u32,
             })
             .collect())
+    }
+
+    /// Lists all live AccessProfiles, including an orphaned profile whose
+    /// host has been deleted. Orphans remain visible here so the user can
+    /// restore or delete them instead of silently losing a synchronized
+    /// object.
+    pub fn access_profiles(&self) -> Result<Vec<AccessProfileSummary>, ObjectEditError> {
+        let profiles = self.profiles().map_err(object_from_failure)?;
+        let hosts = self.host_records().map_err(object_from_failure)?;
+        let credentials = self.credentials().map_err(object_from_failure)?;
+        let routes = self.routes().map_err(object_from_failure)?;
+        let mut result = profiles
+            .iter()
+            .map(|profile| profile_summary(profile, &hosts, &credentials, &routes))
+            .collect::<Result<Vec<_>, _>>()?;
+        result.sort_by(|left, right| {
+            left.host_name
+                .cmp(&right.host_name)
+                .then_with(|| left.username.cmp(&right.username))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(result)
+    }
+
+    /// Reads one AccessProfile without exposing any credential secret.
+    pub fn access_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<Option<AccessProfileSummary>, ObjectEditError> {
+        let id = parse_object_id(&profile_id, "access profile")?;
+        let Some(profile) =
+            Repository::<AccessProfile>::new(&self.store).get(id).map_err(object_from_record)?
+        else {
+            return Ok(None);
+        };
+        let hosts = self.host_records().map_err(object_from_failure)?;
+        let credentials = self.credentials().map_err(object_from_failure)?;
+        let routes = self.routes().map_err(object_from_failure)?;
+        Ok(Some(profile_summary(&profile, &hosts, &credentials, &routes)?))
+    }
+
+    /// Lists credentials with secrets redacted and usage counts attached.
+    pub fn credentials_objects(&self) -> Result<Vec<CredentialSummary>, ObjectEditError> {
+        let credentials = self.credentials().map_err(object_from_failure)?;
+        let profiles = self.profiles().map_err(object_from_failure)?;
+        let routes = self.routes().map_err(object_from_failure)?;
+        let mut result = credentials
+            .iter()
+            .map(|credential| credential_summary(credential, &profiles, &routes))
+            .collect::<Vec<_>>();
+        result
+            .sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
+        Ok(result)
+    }
+
+    /// Reads a single redacted credential.
+    pub fn credential_object(
+        &self,
+        credential_id: String,
+    ) -> Result<Option<CredentialSummary>, ObjectEditError> {
+        let id = parse_object_id(&credential_id, "credential")?;
+        let Some(credential) =
+            Repository::<Credential>::new(&self.store).get(id).map_err(object_from_record)?
+        else {
+            return Ok(None);
+        };
+        let profiles = self.profiles().map_err(object_from_failure)?;
+        let routes = self.routes().map_err(object_from_failure)?;
+        Ok(Some(credential_summary(&credential, &profiles, &routes)))
+    }
+
+    /// Lists routes and how many profiles currently reference each route.
+    pub fn routes_objects(&self) -> Result<Vec<RouteSummary>, ObjectEditError> {
+        let routes = self.routes().map_err(object_from_failure)?;
+        let profiles = self.profiles().map_err(object_from_failure)?;
+        let mut result = routes
+            .iter()
+            .map(|route| route_summary(route, &profiles))
+            .collect::<Result<Vec<_>, _>>()?;
+        result
+            .sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
+        Ok(result)
+    }
+
+    /// Reads one route.
+    pub fn route_object(&self, route_id: String) -> Result<Option<RouteSummary>, ObjectEditError> {
+        let id = parse_object_id(&route_id, "route")?;
+        let Some(route) =
+            Repository::<Route>::new(&self.store).get(id).map_err(object_from_record)?
+        else {
+            return Ok(None);
+        };
+        let profiles = self.profiles().map_err(object_from_failure)?;
+        Ok(Some(route_summary(&route, &profiles)?))
+    }
+
+    /// Creates an AccessProfile and optionally makes it the host default.
+    pub fn create_access_profile(
+        &self,
+        input: AccessProfileInput,
+    ) -> Result<AccessProfileSummary, ObjectEditError> {
+        let validated = self.validate_profile_input(&input, None)?;
+        let profile_id = new_id().map_err(object_from_store)?;
+        let profile_fields = AccessProfileChange {
+            host: Some(validated.host),
+            name: Edit::from_option(validated.name),
+            username: Some(validated.username),
+            credential: Edit::from_option(validated.credential),
+            route: Some(validated.route),
+            terminal_profile: Edit::from_option(validated.terminal_profile),
+            startup_command: Edit::from_option(validated.startup_command),
+            agent_forwarding: Some(validated.agent_forwarding),
+            ..Default::default()
+        }
+        .into_writes()
+        .map_err(object_from_record)?;
+        let writes = input.default_profile.then_some(LocalWrite {
+            id: Some(validated.host),
+            object_type: scoplen_model::ObjectType::HOST,
+            fields: vec![(FieldPath::Field(8), uuid_value(profile_id))],
+        });
+        self.store
+            .create_and_write_batch(
+                vec![NewObject {
+                    id: profile_id,
+                    object_type: scoplen_model::ObjectType::ACCESS_PROFILE,
+                    fields: profile_fields,
+                }],
+                writes.into_iter().collect(),
+            )
+            .map_err(object_from_store)?;
+        self.access_profile(id(profile_id))?.ok_or(ObjectEditError::Failed {
+            reference: "the access profile disappeared after creation".into(),
+        })
+    }
+
+    /// Replaces an AccessProfile after validating every reference. Profile
+    /// fields and any affected Host default fields commit together.
+    pub fn update_access_profile(
+        &self,
+        profile_id: String,
+        input: AccessProfileInput,
+    ) -> Result<AccessProfileSummary, ObjectEditError> {
+        let id = parse_object_id(&profile_id, "access profile")?;
+        let profiles = Repository::<AccessProfile>::new(&self.store);
+        let existing = profiles
+            .get(id)
+            .map_err(object_from_record)?
+            .ok_or_else(|| object_not_found("access profile"))?;
+        let validated = self.validate_profile_input(&input, Some(id))?;
+        let old_host = existing.host;
+        let hosts = Repository::<Host>::new(&self.store);
+        let old_host_record = hosts.get(old_host).map_err(object_from_record)?;
+        let new_host_record = hosts
+            .get(validated.host)
+            .map_err(object_from_record)?
+            .ok_or_else(|| object_not_found("host"))?;
+        let mut host_writes = Vec::new();
+        if old_host != validated.host
+            && old_host_record.is_some_and(|host| host.default_profile == Some(id))
+        {
+            host_writes.push(host_default_write(old_host, None));
+        }
+        if input.default_profile {
+            host_writes.push(host_default_write(validated.host, Some(id)));
+        } else if new_host_record.default_profile == Some(id) {
+            // Keep the host's invariant that a live default points to a live
+            // profile. Select another profile when one exists; otherwise
+            // clear the optional default.
+            let replacement = profiles
+                .list()
+                .map_err(object_from_record)?
+                .into_iter()
+                .find(|candidate| candidate.host == validated.host && candidate.meta.id != id)
+                .map(|candidate| candidate.meta.id);
+            host_writes.push(host_default_write(validated.host, replacement));
+        }
+        let profile_fields = AccessProfileChange {
+            host: Some(validated.host),
+            name: Edit::from_option(validated.name),
+            username: Some(validated.username),
+            credential: Edit::from_option(validated.credential),
+            route: Some(validated.route),
+            terminal_profile: Edit::from_option(validated.terminal_profile),
+            startup_command: Edit::from_option(validated.startup_command),
+            agent_forwarding: Some(validated.agent_forwarding),
+            ..Default::default()
+        }
+        .into_writes()
+        .map_err(object_from_record)?;
+        host_writes.insert(
+            0,
+            LocalWrite {
+                id: Some(id),
+                object_type: scoplen_model::ObjectType::ACCESS_PROFILE,
+                fields: profile_fields,
+            },
+        );
+        self.store.write_batch(host_writes).map_err(object_from_store)?;
+        self.access_profile(profile_id)?.ok_or(ObjectEditError::Failed {
+            reference: "the access profile disappeared after editing".into(),
+        })
+    }
+
+    /// Deletes an AccessProfile. The default profile must be changed first;
+    /// this prevents a host from retaining a dangling default reference.
+    pub fn delete_access_profile(&self, profile_id: String) -> Result<(), ObjectEditError> {
+        let id = parse_object_id(&profile_id, "access profile")?;
+        let profiles = Repository::<AccessProfile>::new(&self.store);
+        let profile = profiles
+            .get(id)
+            .map_err(object_from_record)?
+            .ok_or_else(|| object_not_found("access profile"))?;
+        if Repository::<Host>::new(&self.store)
+            .get(profile.host)
+            .map_err(object_from_record)?
+            .is_some_and(|host| host.default_profile == Some(id))
+        {
+            return Err(ObjectEditError::DefaultProfile);
+        }
+        if Repository::<Forward>::new(&self.store)
+            .list()
+            .map_err(object_from_record)?
+            .iter()
+            .any(|forward| forward.profile == Some(id))
+        {
+            return Err(ObjectEditError::InUse);
+        }
+        profiles.delete(id).map_err(object_from_record)
+    }
+
+    /// Creates a redacted Credential object.
+    pub fn create_credential(
+        &self,
+        input: CredentialInput,
+    ) -> Result<CredentialSummary, ObjectEditError> {
+        let (kind, binding, secret, public_key, provider, certificate_scope, name) =
+            self.validate_credential_input(input, None)?;
+        let credential = Repository::<Credential>::new(&self.store)
+            .create(CredentialChange {
+                name: Edit::from_option(name),
+                kind: Some(kind),
+                binding: Some(binding),
+                secret: secret.map_or(Edit::Keep, |secret| Edit::Set(SecretVec::new(secret))),
+                public_key: Edit::from_option(public_key),
+                provider: provider.into_iter().map(|(key, value)| (key, Some(value))).collect(),
+                certificate_scope: Edit::from_option(certificate_scope),
+                ..Default::default()
+            })
+            .map_err(object_from_record)?;
+        self.credential_object(id(credential.meta.id))?.ok_or(ObjectEditError::Failed {
+            reference: "the credential disappeared after creation".into(),
+        })
+    }
+
+    /// Replaces a Credential description while retaining an omitted shared
+    /// secret. Secrets are never included in the result.
+    pub fn update_credential(
+        &self,
+        credential_id: String,
+        input: CredentialInput,
+    ) -> Result<CredentialSummary, ObjectEditError> {
+        let id = parse_object_id(&credential_id, "credential")?;
+        let credentials = Repository::<Credential>::new(&self.store);
+        let existing = credentials
+            .get(id)
+            .map_err(object_from_record)?
+            .ok_or_else(|| object_not_found("credential"))?;
+        let (kind, binding, secret, public_key, provider, certificate_scope, name) =
+            self.validate_credential_input(input, Some(&existing))?;
+        let secret_change = match secret {
+            Some(secret) => Edit::Set(SecretVec::new(secret)),
+            None if binding == CredentialBinding::Shared && existing.has_secret => Edit::Keep,
+            None => Edit::Clear,
+        };
+        credentials
+            .update(
+                id,
+                CredentialChange {
+                    name: Edit::from_option(name),
+                    kind: Some(kind),
+                    binding: Some(binding),
+                    secret: secret_change,
+                    public_key: Edit::from_option(public_key),
+                    provider: existing
+                        .provider
+                        .keys()
+                        .chain(provider.keys())
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .map(|key| (key.to_owned(), provider.get(key).cloned()))
+                        .collect(),
+                    certificate_scope: Edit::from_option(certificate_scope),
+                    ..Default::default()
+                },
+            )
+            .map_err(object_from_record)?;
+        self.credential_object(credential_id)?.ok_or(ObjectEditError::Failed {
+            reference: "the credential disappeared after editing".into(),
+        })
+    }
+
+    /// Deletes a credential only when no profile or proxy route references it.
+    pub fn delete_credential(&self, credential_id: String) -> Result<(), ObjectEditError> {
+        let id = parse_object_id(&credential_id, "credential")?;
+        let credentials = Repository::<Credential>::new(&self.store);
+        credentials
+            .get(id)
+            .map_err(object_from_record)?
+            .ok_or_else(|| object_not_found("credential"))?;
+        if self
+            .profiles()
+            .map_err(object_from_failure)?
+            .iter()
+            .any(|profile| profile.credential == Some(id))
+            || self
+                .routes()
+                .map_err(object_from_failure)?
+                .iter()
+                .any(|route| route_credential(route) == Some(id))
+        {
+            return Err(ObjectEditError::InUse);
+        }
+        credentials.delete(id).map_err(object_from_record)
+    }
+
+    /// Creates a Route after validating all profile and credential references.
+    pub fn create_route(&self, input: RouteInput) -> Result<RouteSummary, ObjectEditError> {
+        let name = validate_name(input.name)?;
+        let kind = self.validate_route_definition(input.definition, None)?;
+        let route = Repository::<Route>::new(&self.store)
+            .create(RouteChange { name: Some(name), kind: Some(kind) })
+            .map_err(object_from_record)?;
+        self.route_object(id(route.meta.id))?.ok_or(ObjectEditError::Failed {
+            reference: "the route disappeared after creation".into(),
+        })
+    }
+
+    /// Replaces a Route. Kind-specific fields are cleared by `RouteChange`.
+    pub fn update_route(
+        &self,
+        route_id: String,
+        input: RouteInput,
+    ) -> Result<RouteSummary, ObjectEditError> {
+        let id = parse_object_id(&route_id, "route")?;
+        let routes = Repository::<Route>::new(&self.store);
+        routes.get(id).map_err(object_from_record)?.ok_or_else(|| object_not_found("route"))?;
+        let name = validate_name(input.name)?;
+        let kind = self.validate_route_definition(input.definition, Some(id))?;
+        routes
+            .update(id, RouteChange { name: Some(name), kind: Some(kind) })
+            .map_err(object_from_record)?;
+        self.route_object(route_id)?.ok_or(ObjectEditError::Failed {
+            reference: "the route disappeared after editing".into(),
+        })
+    }
+
+    /// Deletes a Route only when no profile references it.
+    pub fn delete_route(&self, route_id: String) -> Result<(), ObjectEditError> {
+        let id = parse_object_id(&route_id, "route")?;
+        let routes = Repository::<Route>::new(&self.store);
+        let route =
+            routes.get(id).map_err(object_from_record)?.ok_or_else(|| object_not_found("route"))?;
+        if matches!(route.kind, RouteKind::Managed { .. }) {
+            return Err(ObjectEditError::ManagedRoute);
+        }
+        if self
+            .profiles()
+            .map_err(object_from_failure)?
+            .iter()
+            .any(|profile| profile.route == RouteChoice::Route(id))
+        {
+            return Err(ObjectEditError::InUse);
+        }
+        routes.delete(id).map_err(object_from_record)
+    }
+
+    fn validate_profile_input(
+        &self,
+        input: &AccessProfileInput,
+        profile_id: Option<Uuid>,
+    ) -> Result<ValidatedProfile, ObjectEditError> {
+        let host = parse_object_id(&input.host, "host")?;
+        let hosts = Repository::<Host>::new(&self.store);
+        if hosts.get(host).map_err(object_from_record)?.is_none() {
+            return Err(object_not_found("host"));
+        }
+        let username = input.username.trim().to_owned();
+        if username.is_empty() {
+            return Err(ObjectEditError::EmptyUsername);
+        }
+        validate_text(&username, "username")?;
+        let name = trim_optional(input.name.as_deref(), "name")?;
+        let terminal_profile =
+            trim_optional(input.terminal_profile.as_deref(), "terminal profile")?;
+        let startup_command = trim_optional(input.startup_command.as_deref(), "startup command")?;
+        let credential = match &input.credential {
+            None => None,
+            Some(value) => {
+                let id = parse_object_id(value, "credential")?;
+                if Repository::<Credential>::new(&self.store)
+                    .get(id)
+                    .map_err(object_from_record)?
+                    .is_none()
+                {
+                    return Err(ObjectEditError::InvalidCredential);
+                }
+                Some(id)
+            }
+        };
+        let route = match &input.route {
+            None => RouteChoice::Direct,
+            Some(value) => {
+                let id = parse_object_id(value, "route")?;
+                if Repository::<Route>::new(&self.store)
+                    .get(id)
+                    .map_err(object_from_record)?
+                    .is_none()
+                {
+                    return Err(ObjectEditError::InvalidRoute);
+                }
+                RouteChoice::Route(id)
+            }
+        };
+        // A profile may not be changed into a self-referential route through a
+        // malformed pre-existing object. The optional id is reserved for a
+        // future stricter route expansion check and keeps validation explicit.
+        let _ = profile_id;
+        Ok(ValidatedProfile {
+            host,
+            name,
+            username,
+            credential,
+            route,
+            terminal_profile,
+            startup_command,
+            agent_forwarding: input.agent_forwarding,
+        })
+    }
+
+    fn validate_credential_input(
+        &self,
+        input: CredentialInput,
+        existing: Option<&Credential>,
+    ) -> Result<ValidatedCredential, ObjectEditError> {
+        let CredentialInput {
+            name,
+            kind: input_kind,
+            binding: input_binding,
+            secret,
+            public_key,
+            provider,
+            certificate_scope,
+        } = input;
+        let kind = credential_kind(input_kind);
+        let binding = credential_binding(input_binding);
+        validate_credential_binding(kind, binding)?;
+        let name = trim_optional(name.as_deref(), "name")?;
+        let public_key = trim_optional(public_key.as_deref(), "public key")?;
+        let certificate_scope = match certificate_scope {
+            Some(value) => Some(parse_object_id(&value, "certificate scope")?),
+            None => None,
+        };
+        let provider = provider
+            .into_iter()
+            .map(|(key, value)| {
+                if key.trim().is_empty() || value.trim().is_empty() {
+                    Err(ObjectEditError::InvalidCredential)
+                } else {
+                    validate_text(&key, "provider key")?;
+                    validate_text(&value, "provider value")?;
+                    Ok((key, value))
+                }
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let secret = match secret {
+            Some(value) if value.is_empty() => return Err(ObjectEditError::SecretRequired),
+            Some(value) => {
+                if value.len() > scoplen_model::MAX_TEXT_BYTES {
+                    return Err(ObjectEditError::TextTooLong { field: "secret".into() });
+                }
+                if binding != CredentialBinding::Shared {
+                    return Err(ObjectEditError::SecretNotAllowed);
+                }
+                Some(value.into_bytes())
+            }
+            None if existing.is_none() && binding == CredentialBinding::Shared => {
+                return Err(ObjectEditError::SecretRequired);
+            }
+            None => None,
+        };
+        if binding != CredentialBinding::Shared && existing.is_none() && secret.is_some() {
+            return Err(ObjectEditError::SecretNotAllowed);
+        }
+        if kind == CredentialKind::ExternalProvider && provider.is_empty() {
+            return Err(ObjectEditError::InvalidCredential);
+        }
+        if kind == CredentialKind::Certificate && certificate_scope.is_none() {
+            return Err(ObjectEditError::InvalidCredential);
+        }
+        Ok((kind, binding, secret, public_key, provider, certificate_scope, name))
+    }
+
+    fn validate_route_definition(
+        &self,
+        definition: RouteDefinition,
+        _route_id: Option<Uuid>,
+    ) -> Result<RouteKind, ObjectEditError> {
+        match definition {
+            RouteDefinition::Jump { hops } => {
+                if hops.is_empty() {
+                    return Err(ObjectEditError::InvalidRoute);
+                }
+                let profiles = self.profiles().map_err(object_from_failure)?;
+                let mut ids = Vec::with_capacity(hops.len());
+                for hop in hops {
+                    let id = parse_object_id(&hop, "jump profile")?;
+                    if !profiles.iter().any(|profile| profile.meta.id == id) {
+                        return Err(ObjectEditError::InvalidRoute);
+                    }
+                    ids.push(id);
+                }
+                Ok(RouteKind::Jump { hops: ids })
+            }
+            RouteDefinition::Socks5 { proxy, credential } => {
+                let proxy = validate_proxy(proxy)?;
+                let credential = self.validate_route_credential(credential)?;
+                Ok(RouteKind::Socks5 { proxy, credential })
+            }
+            RouteDefinition::HttpConnect { proxy, credential } => {
+                let proxy = validate_proxy(proxy)?;
+                let credential = self.validate_route_credential(credential)?;
+                Ok(RouteKind::HttpConnect { proxy, credential })
+            }
+            RouteDefinition::Command { command } => {
+                validate_text(&command, "command")?;
+                if command.trim().is_empty() {
+                    return Err(ObjectEditError::InvalidCommand);
+                }
+                Ok(RouteKind::Command { command })
+            }
+            RouteDefinition::Managed { .. } => Err(ObjectEditError::ManagedRoute),
+        }
+    }
+
+    fn validate_route_credential(
+        &self,
+        credential: Option<String>,
+    ) -> Result<Option<Uuid>, ObjectEditError> {
+        let Some(credential) = credential else { return Ok(None) };
+        let id = parse_object_id(&credential, "credential")?;
+        if Repository::<Credential>::new(&self.store).get(id).map_err(object_from_record)?.is_none()
+        {
+            return Err(ObjectEditError::InvalidCredential);
+        }
+        Ok(Some(id))
     }
 
     /// Lists hosts from a source, filtered by name, address, username, or tag.
@@ -1338,6 +2145,264 @@ impl Inventory {
             .map(|profile| profile.host)
             .collect())
     }
+}
+
+struct ValidatedProfile {
+    host: Uuid,
+    name: Option<String>,
+    username: String,
+    credential: Option<Uuid>,
+    route: RouteChoice,
+    terminal_profile: Option<String>,
+    startup_command: Option<String>,
+    agent_forwarding: bool,
+}
+
+type ValidatedCredential = (
+    CredentialKind,
+    CredentialBinding,
+    Option<Vec<u8>>,
+    Option<String>,
+    BTreeMap<String, String>,
+    Option<Uuid>,
+    Option<String>,
+);
+
+fn credential_kind(input: CredentialKindInput) -> CredentialKind {
+    match input {
+        CredentialKindInput::Password => CredentialKind::Password,
+        CredentialKindInput::Key => CredentialKind::PrivateKey,
+        CredentialKindInput::Certificate => CredentialKind::Certificate,
+        CredentialKindInput::Agent => CredentialKind::Agent,
+        CredentialKindInput::SecurityKey => CredentialKind::SecurityKey,
+        CredentialKindInput::DeviceKey => CredentialKind::DeviceBoundKey,
+        CredentialKindInput::External => CredentialKind::ExternalProvider,
+    }
+}
+
+fn credential_kind_input(kind: CredentialKind) -> CredentialKindInput {
+    match kind {
+        CredentialKind::Password => CredentialKindInput::Password,
+        CredentialKind::PrivateKey => CredentialKindInput::Key,
+        CredentialKind::Certificate => CredentialKindInput::Certificate,
+        CredentialKind::Agent => CredentialKindInput::Agent,
+        CredentialKind::SecurityKey => CredentialKindInput::SecurityKey,
+        CredentialKind::DeviceBoundKey => CredentialKindInput::DeviceKey,
+        CredentialKind::ExternalProvider => CredentialKindInput::External,
+    }
+}
+
+fn credential_binding(input: CredentialBindingInput) -> CredentialBinding {
+    match input {
+        CredentialBindingInput::Shared => CredentialBinding::Shared,
+        CredentialBindingInput::Device => CredentialBinding::Device,
+        CredentialBindingInput::None => CredentialBinding::None,
+    }
+}
+
+fn credential_binding_input(binding: CredentialBinding) -> CredentialBindingInput {
+    match binding {
+        CredentialBinding::Shared => CredentialBindingInput::Shared,
+        CredentialBinding::Device => CredentialBindingInput::Device,
+        CredentialBinding::None => CredentialBindingInput::None,
+    }
+}
+
+fn validate_credential_binding(
+    kind: CredentialKind,
+    binding: CredentialBinding,
+) -> Result<(), ObjectEditError> {
+    let valid = match kind {
+        CredentialKind::Password | CredentialKind::PrivateKey => {
+            matches!(binding, CredentialBinding::Shared | CredentialBinding::Device)
+        }
+        CredentialKind::Certificate
+        | CredentialKind::SecurityKey
+        | CredentialKind::DeviceBoundKey => {
+            matches!(binding, CredentialBinding::Device | CredentialBinding::None)
+        }
+        CredentialKind::Agent | CredentialKind::ExternalProvider => {
+            binding == CredentialBinding::None
+        }
+    };
+    valid.then_some(()).ok_or(ObjectEditError::InvalidCredentialBinding)
+}
+
+fn validate_name(name: String) -> Result<String, ObjectEditError> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err(ObjectEditError::EmptyName);
+    }
+    validate_text(&name, "name")?;
+    Ok(name)
+}
+
+fn trim_optional(value: Option<&str>, field: &str) -> Result<Option<String>, ObjectEditError> {
+    let Some(value) = value else { return Ok(None) };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate_text(value, field)?;
+    Ok(Some(value.to_owned()))
+}
+
+fn validate_text(value: &str, field: &str) -> Result<(), ObjectEditError> {
+    if value.len() > scoplen_model::MAX_TEXT_BYTES {
+        Err(ObjectEditError::TextTooLong { field: field.into() })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_proxy(proxy: String) -> Result<String, ObjectEditError> {
+    let proxy = proxy.trim().to_owned();
+    if proxy.chars().any(char::is_whitespace) {
+        return Err(ObjectEditError::InvalidProxy);
+    }
+    let Some((host, port)) = proxy.rsplit_once(':') else {
+        return Err(ObjectEditError::InvalidProxy);
+    };
+    if host.is_empty() || !port.parse::<u16>().is_ok_and(|port| port != 0) {
+        return Err(ObjectEditError::InvalidProxy);
+    }
+    validate_text(&proxy, "proxy")?;
+    Ok(proxy)
+}
+
+fn parse_object_id(value: &str, field: &str) -> Result<Uuid, ObjectEditError> {
+    parse_id(value).map_err(|_| ObjectEditError::InvalidId { field: field.into() })
+}
+
+fn object_not_found(kind: &str) -> ObjectEditError {
+    ObjectEditError::NotFound { entity: kind.into() }
+}
+
+fn object_from_record(error: RecordError) -> ObjectEditError {
+    ObjectEditError::Failed { reference: diagnostic(&error) }
+}
+
+fn object_from_store(error: StoreError) -> ObjectEditError {
+    ObjectEditError::Failed { reference: diagnostic(&error) }
+}
+
+fn object_from_failure(error: Failure) -> ObjectEditError {
+    match error {
+        Failure::Failed { reference } => ObjectEditError::Failed { reference },
+    }
+}
+
+fn route_credential(route: &Route) -> Option<Uuid> {
+    match &route.kind {
+        RouteKind::Socks5 { credential, .. } | RouteKind::HttpConnect { credential, .. } => {
+            *credential
+        }
+        _ => None,
+    }
+}
+
+fn host_default_write(host: Uuid, profile: Option<Uuid>) -> LocalWrite {
+    LocalWrite {
+        id: Some(host),
+        object_type: scoplen_model::ObjectType::HOST,
+        fields: vec![(
+            FieldPath::Field(8),
+            profile.map_or(scoplen_model::cbor::Value::Null, uuid_value),
+        )],
+    }
+}
+
+fn credential_summary(
+    credential: &Credential,
+    profiles: &[AccessProfile],
+    routes: &[Route],
+) -> CredentialSummary {
+    CredentialSummary {
+        id: id(credential.meta.id),
+        name: credential.name.clone(),
+        kind: credential_kind_input(credential.kind),
+        binding: credential_binding_input(credential.binding),
+        has_secret: credential.has_secret,
+        public_key: credential.public_key.clone(),
+        provider: credential.provider.clone(),
+        certificate_scope: credential.certificate_scope.map(id),
+        profile_count: profiles
+            .iter()
+            .filter(|profile| profile.credential == Some(credential.meta.id))
+            .count() as u32,
+        route_count: routes
+            .iter()
+            .filter(|route| route_credential(route) == Some(credential.meta.id))
+            .count() as u32,
+        restored: credential.meta.restored,
+    }
+}
+
+fn route_definition(route: &Route) -> RouteDefinition {
+    match &route.kind {
+        RouteKind::Jump { hops } => {
+            RouteDefinition::Jump { hops: hops.iter().copied().map(id).collect() }
+        }
+        RouteKind::Socks5 { proxy, credential } => {
+            RouteDefinition::Socks5 { proxy: proxy.clone(), credential: credential.map(id) }
+        }
+        RouteKind::HttpConnect { proxy, credential } => {
+            RouteDefinition::HttpConnect { proxy: proxy.clone(), credential: credential.map(id) }
+        }
+        RouteKind::Command { command } => RouteDefinition::Command { command: command.clone() },
+        RouteKind::Managed { gateway_network } => {
+            RouteDefinition::Managed { gateway_network: id(*gateway_network) }
+        }
+    }
+}
+
+fn route_summary(
+    route: &Route,
+    profiles: &[AccessProfile],
+) -> Result<RouteSummary, ObjectEditError> {
+    Ok(RouteSummary {
+        id: id(route.meta.id),
+        name: route.name.clone(),
+        definition: route_definition(route),
+        profile_count: profiles
+            .iter()
+            .filter(|profile| profile.route == RouteChoice::Route(route.meta.id))
+            .count() as u32,
+        restored: route.meta.restored,
+    })
+}
+
+fn profile_summary(
+    profile: &AccessProfile,
+    hosts: &[Host],
+    credentials: &[Credential],
+    routes: &[Route],
+) -> Result<AccessProfileSummary, ObjectEditError> {
+    let host = hosts.iter().find(|host| host.meta.id == profile.host);
+    let credential = profile
+        .credential
+        .and_then(|credential| credentials.iter().find(|item| item.meta.id == credential))
+        .map(credential_label);
+    let route_id = match profile.route {
+        RouteChoice::Direct => None,
+        RouteChoice::Route(id) => Some(id),
+    };
+    Ok(AccessProfileSummary {
+        id: id(profile.meta.id),
+        host: id(profile.host),
+        host_name: host.map(|host| host.name.clone()),
+        name: profile.name.clone(),
+        username: profile.username.clone(),
+        credential,
+        credential_id: profile.credential.map(id),
+        route: route_label(profile, routes),
+        route_id: route_id.map(id),
+        terminal_profile: profile.terminal_profile.clone(),
+        startup_command: profile.startup_command.clone(),
+        agent_forwarding: profile.agent_forwarding,
+        is_default: host.is_some_and(|host| host.default_profile == Some(profile.meta.id)),
+        restored: profile.meta.restored,
+    })
 }
 
 fn summary(host: &Host, profiles: &[AccessProfile], routes: &[Route]) -> HostSummary {
@@ -2313,5 +3378,137 @@ mod tests {
         assert!(inventory.hosts(HostSource::All, String::new()).unwrap().len() == 1);
         let error = inventory.import_open_ssh_config(preview).unwrap_err();
         assert_eq!(error, OpenSshImportError::InventoryNotEmpty);
+    }
+
+    #[test]
+    fn independent_objects_round_trip_and_redact_credentials() {
+        let inventory = inventory();
+        let host = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let profile_id = host.logins[0].id.clone();
+        let credential = inventory
+            .create_credential(CredentialInput {
+                name: Some("deploy password".into()),
+                kind: CredentialKindInput::Password,
+                binding: CredentialBindingInput::Shared,
+                secret: Some("do-not-return".into()),
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .unwrap();
+        assert!(credential.has_secret);
+        assert!(!format!("{credential:?}").contains("do-not-return"));
+        let route = inventory
+            .create_route(RouteInput {
+                name: "local proxy".into(),
+                definition: RouteDefinition::Socks5 {
+                    proxy: "127.0.0.1:1080".into(),
+                    credential: Some(credential.id.clone()),
+                },
+            })
+            .unwrap();
+        let profile = inventory
+            .update_access_profile(
+                profile_id.clone(),
+                AccessProfileInput {
+                    host: host.summary.id.clone(),
+                    name: Some("production".into()),
+                    username: "ops".into(),
+                    credential: Some(credential.id.clone()),
+                    route: Some(route.id.clone()),
+                    terminal_profile: None,
+                    startup_command: None,
+                    agent_forwarding: false,
+                    default_profile: true,
+                },
+            )
+            .unwrap();
+        assert!(profile.is_default);
+        assert_eq!(profile.credential_id, Some(credential.id.clone()));
+        assert_eq!(profile.route_id, Some(route.id.clone()));
+        assert_eq!(inventory.access_profiles().unwrap().len(), 1);
+        assert_eq!(
+            inventory
+                .routes_objects()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == route.id)
+                .expect("created route is listed")
+                .profile_count,
+            1
+        );
+        assert_eq!(
+            inventory
+                .credentials_objects()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == credential.id)
+                .expect("created credential is listed")
+                .profile_count,
+            1
+        );
+        assert_eq!(inventory.delete_credential(credential.id.clone()), Err(ObjectEditError::InUse));
+        assert_eq!(inventory.delete_route(route.id.clone()), Err(ObjectEditError::InUse));
+        assert_eq!(
+            inventory.delete_access_profile(profile_id.clone()),
+            Err(ObjectEditError::DefaultProfile)
+        );
+        inventory
+            .update_access_profile(
+                profile_id,
+                AccessProfileInput {
+                    host: host.summary.id,
+                    name: Some("production".into()),
+                    username: "ops".into(),
+                    credential: Some(credential.id.clone()),
+                    route: Some(route.id.clone()),
+                    terminal_profile: None,
+                    startup_command: None,
+                    agent_forwarding: false,
+                    default_profile: false,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn independent_object_validation_writes_nothing_and_binding_rules_hold() {
+        let inventory = inventory();
+        let before = inventory.store.list(scoplen_model::ObjectType::CREDENTIAL).unwrap().len();
+        assert_eq!(
+            inventory.create_credential(CredentialInput {
+                name: Some("bad".into()),
+                kind: CredentialKindInput::SecurityKey,
+                binding: CredentialBindingInput::Shared,
+                secret: Some("secret".into()),
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            }),
+            Err(ObjectEditError::InvalidCredentialBinding)
+        );
+        assert_eq!(
+            inventory.store.list(scoplen_model::ObjectType::CREDENTIAL).unwrap().len(),
+            before
+        );
+        assert_eq!(
+            inventory.create_route(RouteInput {
+                name: "bad proxy".into(),
+                definition: RouteDefinition::Socks5 {
+                    proxy: "not-an-endpoint".into(),
+                    credential: None,
+                },
+            }),
+            Err(ObjectEditError::InvalidProxy)
+        );
+        assert!(format!("{:?}", ObjectEditError::SecretRequired).contains("SecretRequired"));
     }
 }

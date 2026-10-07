@@ -264,6 +264,40 @@ impl Store {
         self.create_batch_with_implicit(creates, Vec::new())
     }
 
+    /// Creates new objects and applies updates to existing objects in one
+    /// transaction. This is used by inventory operations whose object
+    /// identity must be referenced by a related existing record (for example
+    /// selecting a newly created AccessProfile as a Host's default profile).
+    /// Every object is validated before the transaction commits and listeners
+    /// are notified only after the complete operation succeeds.
+    pub fn create_and_write_batch(
+        &self,
+        creates: Vec<NewObject>,
+        writes: Vec<LocalWrite>,
+    ) -> Result<Vec<Object>, StoreError> {
+        if creates.is_empty() && writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (objects, changes) = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut objects = Vec::with_capacity(creates.len() + writes.len());
+            for create in creates {
+                objects.push(apply_create(&tx, self.device_id, create)?);
+            }
+            for write in writes {
+                objects.push(apply_write(&tx, self.device_id, write)?);
+            }
+            tx.commit()?;
+            let changes = grouped_changes(&objects);
+            (objects, changes)
+        };
+        for change in changes {
+            self.notify(&change);
+        }
+        Ok(objects)
+    }
+
     /// Creates several related objects and records the subset that starts as
     /// implicit in one transaction. The metadata is local to this device;
     /// object envelopes remain unchanged and therefore continue to sync.

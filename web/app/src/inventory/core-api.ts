@@ -8,9 +8,13 @@ import {
   commands,
   events,
   type AddHostError as IpcAddHostError,
+  type AccessProfileInput as IpcAccessProfileInput,
+  type AccessProfileSummary as IpcAccessProfileSummary,
   type Areas as IpcAreas,
   type EditHost as IpcEditHost,
   type EditHostError as IpcEditHostError,
+  type CredentialInput as IpcCredentialInput,
+  type CredentialSummary as IpcCredentialSummary,
   type Failure as IpcFailure,
   type GroupError as IpcGroupError,
   type GroupInput as IpcGroupInput,
@@ -23,12 +27,19 @@ import {
   type OpenSshImportError as IpcOpenSshImportError,
   type OpenSshImportPreview as IpcOpenSshImportPreview,
   type OpenSshImportResult as IpcOpenSshImportResult,
+  type ObjectEditError as IpcObjectEditError,
+  type RouteInput as IpcRouteInput,
+  type RouteSummary as IpcRouteSummary,
 } from "../ipc/bindings";
 import type {
   AddHostError,
+  AccessProfileInput,
+  AccessProfileSummary,
   Deletion,
   EditHost,
   EditHostError,
+  CredentialInput,
+  CredentialSummary,
   Failure,
   GroupError,
   GroupInput,
@@ -40,8 +51,11 @@ import type {
   OpenSshImportError,
   OpenSshImportPreview,
   OpenSshImportResult,
+  ObjectEditError,
   Outcome,
   RecentSession,
+  RouteInput,
+  RouteSummary,
 } from "./api";
 
 type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
@@ -63,6 +77,10 @@ function outcome<T, E>(result: Result<T, E>): Outcome<T, E> {
 
 function inventoryOutcome<T>(result: Result<T, IpcFailure>): Outcome<T, Failure> {
   return result.status === "ok" ? result : { status: "error", error: failure(result.error) };
+}
+
+function inventoryObjectOutcome<T>(result: Result<T, IpcObjectEditError>): Outcome<T, ObjectEditError> {
+  return result.status === "ok" ? result : { status: "error", error: result.error as ObjectEditError };
 }
 
 /** Creates the desktop adapter used by the real Hosts screen. */
@@ -97,6 +115,70 @@ export function createInventoryApi(): InventoryApi {
       outcome(
         (await commands.inventoryUpdateGroup(id, input as IpcGroupInput)) as Result<GroupSummary, IpcGroupError>,
       ) as Outcome<GroupSummary, GroupError>,
+    accessProfiles: async () =>
+      inventoryObjectOutcome(
+        (await commands.inventoryAccessProfiles()) as Result<IpcAccessProfileSummary[], IpcObjectEditError>,
+      ) as Outcome<AccessProfileSummary[], ObjectEditError>,
+    createAccessProfile: async (input: AccessProfileInput) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryCreateAccessProfile(input as IpcAccessProfileInput)) as Result<
+          IpcAccessProfileSummary,
+          IpcObjectEditError
+        >,
+      ) as Outcome<AccessProfileSummary, ObjectEditError>,
+    updateAccessProfile: async (id: string, input: AccessProfileInput) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryUpdateAccessProfile(id, input as IpcAccessProfileInput)) as Result<
+          IpcAccessProfileSummary,
+          IpcObjectEditError
+        >,
+      ) as Outcome<AccessProfileSummary, ObjectEditError>,
+    deleteAccessProfile: async (id: string) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryDeleteAccessProfile(id)) as Result<null, IpcObjectEditError>,
+      ) as Outcome<null, ObjectEditError>,
+    credentials: async () =>
+      inventoryObjectOutcome(
+        (await commands.inventoryCredentials()) as Result<IpcCredentialSummary[], IpcObjectEditError>,
+      ) as Outcome<CredentialSummary[], ObjectEditError>,
+    createCredential: async (input: CredentialInput) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryCreateCredential(input as IpcCredentialInput)) as Result<
+          IpcCredentialSummary,
+          IpcObjectEditError
+        >,
+      ) as Outcome<CredentialSummary, ObjectEditError>,
+    updateCredential: async (id: string, input: CredentialInput) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryUpdateCredential(id, input as IpcCredentialInput)) as Result<
+          IpcCredentialSummary,
+          IpcObjectEditError
+        >,
+      ) as Outcome<CredentialSummary, ObjectEditError>,
+    deleteCredential: async (id: string) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryDeleteCredential(id)) as Result<null, IpcObjectEditError>,
+      ) as Outcome<null, ObjectEditError>,
+    routes: async () =>
+      inventoryObjectOutcome(
+        (await commands.inventoryRoutes()) as Result<IpcRouteSummary[], IpcObjectEditError>,
+      ) as Outcome<RouteSummary[], ObjectEditError>,
+    createRoute: async (input: RouteInput) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryCreateRoute(input as IpcRouteInput)) as Result<IpcRouteSummary, IpcObjectEditError>,
+      ) as Outcome<RouteSummary, ObjectEditError>,
+    updateRoute: async (id: string, input: RouteInput) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryUpdateRoute(id, input as IpcRouteInput)) as Result<
+          IpcRouteSummary,
+          IpcObjectEditError
+        >,
+      ) as Outcome<RouteSummary, ObjectEditError>,
+    deleteRoute: async (id: string) =>
+      inventoryObjectOutcome((await commands.inventoryDeleteRoute(id)) as Result<null, IpcObjectEditError>) as Outcome<
+        null,
+        ObjectEditError
+      >,
     setFavorite: async (id: string, favorite: boolean) =>
       inventoryOutcome((await commands.inventorySetFavorite(id, favorite)) as Result<null, IpcFailure>),
     deleteHost: async (id: string) =>

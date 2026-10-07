@@ -6,9 +6,11 @@
 
 use crate::local_data::LocalDataState;
 use scoplen_client_core::inventory::{
-    AddHostError, Areas, Deletion, DeletionStore, EditHost, EditHostError, Failure, GroupError,
+    AccessProfileInput, AccessProfileSummary, AddHostError, Areas, CredentialInput,
+    CredentialSummary, Deletion, DeletionStore, EditHost, EditHostError, Failure, GroupError,
     GroupInput, GroupSummary, HostDetails, HostSource, HostSummary, Inventory, NewHost,
-    OpenSshImportError, OpenSshImportPreview, OpenSshImportResult, RecentSession,
+    ObjectEditError, OpenSshImportError, OpenSshImportPreview, OpenSshImportResult, RecentSession,
+    RouteInput, RouteSummary,
 };
 
 /// Process-local undo state shared by inventory command calls.
@@ -179,6 +181,210 @@ pub async fn inventory_update_group(
     tauri::async_runtime::spawn_blocking(move || inventory.update_group(id, group))
         .await
         .map_err(|error| GroupError::Failed { reference: error.to_string() })?
+}
+
+/// Lists independent access profiles with redacted references.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_access_profiles(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+) -> Result<Vec<AccessProfileSummary>, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.access_profiles())
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Creates an independent access profile.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_create_access_profile(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    profile: AccessProfileInput,
+) -> Result<AccessProfileSummary, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.create_access_profile(profile))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Replaces an independent access profile.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_update_access_profile(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+    profile: AccessProfileInput,
+) -> Result<AccessProfileSummary, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.update_access_profile(id, profile))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Deletes an independent access profile after reference checks.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_delete_access_profile(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+) -> Result<(), ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.delete_access_profile(id))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Lists redacted independent credentials.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_credentials(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+) -> Result<Vec<CredentialSummary>, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.credentials_objects())
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Creates a redacted independent credential.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_create_credential(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    credential: CredentialInput,
+) -> Result<CredentialSummary, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.create_credential(credential))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Replaces a redacted independent credential.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_update_credential(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+    credential: CredentialInput,
+) -> Result<CredentialSummary, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.update_credential(id, credential))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Deletes an independent credential after reference checks.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_delete_credential(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+) -> Result<(), ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.delete_credential(id))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Lists independent routes.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_routes(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+) -> Result<Vec<RouteSummary>, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.routes_objects())
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Creates an independent route.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_create_route(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    route: RouteInput,
+) -> Result<RouteSummary, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.create_route(route))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Replaces an independent route.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_update_route(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+    route: RouteInput,
+) -> Result<RouteSummary, ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.update_route(id, route))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Deletes an independent route after reference checks.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_delete_route(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+) -> Result<(), ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.delete_route(id))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
 }
 
 /// Tombstones a host and returns a short-lived undo token.
