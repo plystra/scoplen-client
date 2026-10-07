@@ -1,5 +1,6 @@
 packages:
   - web/app
+  - web/terminal
   - web/ui
 minimumReleaseAgeExclude:
   - vite@8.3.3
