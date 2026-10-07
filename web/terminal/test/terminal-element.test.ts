@@ -16,6 +16,20 @@ afterEach(() => {
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe("ScoplenTerminalElement", () => {
+  it("loads xterm styles inside its shadow root", () => {
+    const element = mount();
+    const stylesheet = element.shadowRoot?.querySelector('link[rel="stylesheet"]');
+    expect(stylesheet).toBeInstanceOf(HTMLLinkElement);
+    expect(stylesheet?.getAttribute("href")).toMatch(/xterm\.css$/);
+  });
+
+  it("preserves a host-provided accessible label", () => {
+    const element = document.createElement("scoplen-terminal");
+    element.setAttribute("aria-label", "SSH terminal output");
+    document.body.append(element);
+    expect(element.getAttribute("aria-label")).toBe("SSH terminal output");
+  });
+
   it("keeps output binary, renders text, and reports only an actual bound overflow", () => {
     let emit: ((chunk: TerminalBytes) => void) | undefined;
     const source = {

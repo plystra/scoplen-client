@@ -2,7 +2,6 @@
 /* eslint-disable @typescript-eslint/no-invalid-void-type */
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { Terminal as XtermTerminal, type ITerminalOptions } from "@xterm/xterm";
-import "@xterm/xterm/css/xterm.css";
 import {
   TerminalBackpressureError,
   TerminalBoundsError,
@@ -167,6 +166,9 @@ export class ScoplenTerminalElement extends HTMLElementBase {
       return;
     }
     const shadow = this.attachShadow({ mode: "open" });
+    const xtermStyles = document.createElement("link");
+    xtermStyles.rel = "stylesheet";
+    xtermStyles.href = new URL("./xterm.css", import.meta.url).href;
     const style = document.createElement("style");
     style.textContent =
       ":host{display:block;contain:content;background:#111827;color:#f3f4f6;min-height:4rem;position:relative;overflow:hidden}:host(:focus-visible){outline:2px solid #60a5fa;outline-offset:2px}.terminal-host{height:100%;width:100%;min-height:inherit}.terminal-host[hidden]{display:none}.fallback-output{box-sizing:border-box;height:100%;min-height:inherit;margin:0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:.75rem;font:14px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.broadcast-indicator{position:absolute;right:.5rem;top:.5rem;border:1px solid #fbbf24;background:#422006;color:#fde68a;padding:.125rem .375rem;font:600 11px/1.4 ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em}.broadcast-indicator[hidden]{display:none}.xterm{height:100%;width:100%;min-height:inherit}";
@@ -185,7 +187,7 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this.broadcastIndicator.setAttribute("aria-live", "polite");
     this.broadcastIndicator.textContent = "Broadcast input on";
     this.broadcastIndicator.hidden = true;
-    shadow.append(style, this.terminalHost, this.fallbackOutput, this.broadcastIndicator);
+    shadow.append(xtermStyles, style, this.terminalHost, this.fallbackOutput, this.broadcastIndicator);
   }
 
   get source(): TerminalSource | null {
@@ -277,7 +279,7 @@ export class ScoplenTerminalElement extends HTMLElementBase {
     this.connected = true;
     this.lifecycleGeneration += 1;
     this.setAttribute("role", "application");
-    this.setAttribute("aria-label", "Terminal");
+    if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Terminal");
     this.tabIndex = 0;
     if (!this.listenersAttached) {
       this.addEventListener("keydown", this.onKeyDown);

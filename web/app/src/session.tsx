@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Button, Dialog } from "@scoplen/ui";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Terminal, type TerminalSink, type TerminalSource } from "@scoplen/terminal/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "./i18n";
 import { commands, type HostKeyDetails } from "./ipc/bindings";
 import { frameChannel } from "./ipc/frames";
@@ -19,72 +20,108 @@ export function SessionTerminal({
 }) {
   const { t } = useI18n();
   const [state, setState] = useState<SessionState>("verifying");
-  const [output, setOutput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [hostKey, setHostKey] = useState<HostKeyDetails | null>(null);
   const [trustError, setTrustError] = useState<string | null>(null);
   const [trustBusy, setTrustBusy] = useState(false);
+  const [source, setSource] = useState<TerminalSource | null>(null);
   const mounted = useRef(true);
+  const sessionId = useMemo(() => crypto.randomUUID(), []);
 
-  const connectSession = useCallback(async () => {
+  const connectSession = useCallback(() => {
     if (!mounted.current) return;
     setState("connecting");
-    const decoder = new TextDecoder();
-    const frames = frameChannel((frame) => {
-      if (!mounted.current) return;
-      setOutput((current) => current + decoder.decode(frame, { stream: true }));
+    setError(null);
+    setSource({
+      subscribe(onChunk, { signal }) {
+        let active = true;
+        const frames = frameChannel((chunk) => {
+          if (!active || !mounted.current) return;
+          setState("connected");
+          onChunk(chunk);
+        });
+
+        const stop = () => {
+          if (!active) return;
+          active = false;
+          void commands.sessionCloseTransport(sessionId).catch(() => undefined);
+        };
+        signal.addEventListener("abort", stop, { once: true });
+
+        void commands
+          .sessionConnect(profileId, null, true, sessionId, frames)
+          .then((result) => {
+            if (!active || !mounted.current) return;
+            if (result.status === "ok") {
+              setState("closed");
+            } else {
+              setState("failed");
+              setError(result.error);
+            }
+          })
+          .catch((cause: unknown) => {
+            if (!active || !mounted.current) return;
+            setState("failed");
+            setError(cause instanceof Error ? cause.message : String(cause));
+          });
+
+        return { unsubscribe: stop };
+      },
     });
-    try {
-      setState("connected");
-      const result = await commands.sessionConnect(profileId, null, true, frames);
-      if (!mounted.current) return;
-      const tail = decoder.decode();
-      if (tail) setOutput((current) => current + tail);
-      if (result.status === "ok") {
-        setState("closed");
-      } else {
-        setState("failed");
-        setError(result.error);
-      }
-    } catch (cause) {
-      if (!mounted.current) return;
-      setState("failed");
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [profileId]);
+  }, [profileId, sessionId]);
+
+  const inputSink = useMemo<TerminalSink>(
+    () => ({
+      async write(bytes) {
+        const result = await commands.sessionInput(sessionId, Array.from(bytes));
+        if (result.status === "error") throw new Error(result.error);
+      },
+    }),
+    [sessionId],
+  );
+  const terminalProfile = useMemo(() => ({ cursorBlink: true, scrollback: 2_000 }), []);
+
+  const closeTransport = useCallback(() => {
+    void commands.sessionCloseTransport(sessionId).catch(() => undefined);
+  }, [sessionId]);
 
   useEffect(() => {
+    let active = true;
     mounted.current = true;
 
     void (async () => {
       try {
         await Promise.resolve();
-        if (!mounted.current) return;
+        if (!active || !mounted.current) return;
         setState("verifying");
         setError(null);
         setHostKey(null);
         setTrustError(null);
         const result = await commands.sessionHostKey(profileId);
-        if (!mounted.current) return;
+        if (!active || !mounted.current) return;
         if (result.status === "error") {
           setState("failed");
           setError(result.error);
           return;
         }
-        setHostKey(result.data);
-        if (result.data.status === "trusted") void connectSession();
-        else setState("trusting");
+        if (result.data.status === "trusted") connectSession();
+        else {
+          setHostKey(result.data);
+          setState("trusting");
+        }
       } catch (cause) {
-        if (!mounted.current) return;
+        if (!active || !mounted.current) return;
         setState("failed");
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     })();
 
     return () => {
+      active = false;
       mounted.current = false;
+      void commands.sessionCloseTransport(sessionId).catch(() => undefined);
     };
-  }, [connectSession, profileId]);
+  }, [connectSession, profileId, sessionId]);
 
   const cancelTrust = () => {
     if (trustBusy) return;
@@ -132,23 +169,36 @@ export function SessionTerminal({
             {status}
           </p>
         </div>
-        <Button variant="ghost" className="shrink-0 text-[#f5f0e8] hover:bg-[#282521]" onClick={onClose}>
+        <Button
+          variant="ghost"
+          className="shrink-0 hover:bg-[#282521]"
+          style={{ color: "#f5f0e8" }}
+          onClick={() => {
+            closeTransport();
+            onClose();
+          }}
+        >
           {t("session.close")}
         </Button>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+      <div className="relative min-h-0 flex-1 overflow-hidden px-5 py-4">
         {error ? (
-          <p role="alert" className="mb-3 whitespace-pre-wrap text-sm text-[#f2a39b]">
+          <p role="alert" className="absolute left-5 right-5 top-4 z-10 whitespace-pre-wrap text-sm text-[#f2a39b]">
             {error}
           </p>
         ) : null}
-        <pre
-          role="log"
+        <Terminal
+          source={source}
+          sink={inputSink}
           aria-label={t("session.output")}
-          className="m-0 min-h-full whitespace-pre-wrap break-words font-mono text-sm leading-6"
-        >
-          {output || t("session.waiting")}
-        </pre>
+          className="h-full min-h-0 rounded-md"
+          profile={terminalProfile}
+          onTerminalError={(terminalError) => {
+            if (!mounted.current) return;
+            setState("failed");
+            setError(terminalError.message);
+          }}
+        />
       </div>
       <Dialog
         open={hostKey !== null}

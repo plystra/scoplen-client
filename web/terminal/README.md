@@ -13,6 +13,10 @@ split-pane layout state without pretending to create a connection. WebGL,
 Unicode width addons, serialization, image protocols, platform-wide IME
 verification, and the compatibility suite remain planned work.
 
+The package build copies xterm's CSS into `dist`; each custom element loads it
+inside its shadow root so renderer styles apply without leaking into the host
+page. Consumers should run the package build before bundling a workspace app.
+
 ## Direct custom element
 
 ```ts

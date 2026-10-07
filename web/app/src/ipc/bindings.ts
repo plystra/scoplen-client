@@ -35,7 +35,11 @@ export const commands = {
 	 *  Host-key verification uses active, host-specific trust records and remains
 	 *  fail-closed for new, changed, revoked, wildcard-only, or CA records.
 	 */
-	sessionConnect: (profileId: string, command: string | null, pty: boolean, frames: Channel<ArrayBuffer>) => typedError<null, string>(__TAURI_INVOKE("session_connect", { profileId, command, pty, frames })),
+	sessionConnect: (profileId: string, command: string | null, pty: boolean, sessionId: string, frames: Channel<ArrayBuffer>) => typedError<null, string>(__TAURI_INVOKE("session_connect", { profileId, command, pty, sessionId, frames })),
+	/**  Sends one bounded input chunk to a live shell session. */
+	sessionInput: (sessionId: string, data: number[]) => typedError<null, string>(__TAURI_INVOKE("session_input", { sessionId, data })),
+	/**  Closes the transport for a live shell session. */
+	sessionCloseTransport: (sessionId: string) => typedError<null, string>(__TAURI_INVOKE("session_close_transport", { sessionId })),
 	/**  Returns which inventory areas have content. */
 	inventoryAreas: () => typedError<Areas, Failure>(__TAURI_INVOKE("inventory_areas")),
 	/**  Lists groups with live-host counts. */

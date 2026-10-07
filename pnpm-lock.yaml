@@ -32,6 +32,9 @@ importers:
 
   web/app:
     dependencies:
+      '@scoplen/terminal':
+        specifier: workspace:*
+        version: link:../terminal
       '@scoplen/ui':
         specifier: workspace:*
         version: link:../ui

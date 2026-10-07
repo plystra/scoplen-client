@@ -28,7 +28,7 @@
     }
   },
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
+    "build": "tsc --project tsconfig.build.json && node scripts/copy-xterm-css.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

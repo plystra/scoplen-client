@@ -40,6 +40,9 @@ initialization has an accessible bounded text fallback and reports a typed
 error when host capabilities are missing. WebGL, Unicode width addons,
 serialization, image protocols, platform-wide IME verification, and the
 `vttest`/`esctest` compatibility suite remain later C4 outcomes.
+The package copies xterm's stylesheet into its distribution and loads it inside
+the terminal custom element's shadow root, so the renderer styles are scoped to
+the component in both desktop and browser consumers.
 
 ## Local data
 
@@ -83,9 +86,12 @@ command reads active host-specific trust records before opening a socket;
 new, changed, revoked, wildcard-only, and CA records are rejected. Password
 authentication, one command, and an optional PTY shell are available now.
 Output is delivered as bounded binary frames (8 MiB aggregate per session),
-and command/input fields are bounded at 64 KiB. Jump and proxy routes,
-non-password credentials, reconnect ownership, and explicit first-use trust
-prompts remain later connection slices.
+and command/input fields are bounded at 64 KiB. The desktop session view uses
+`@scoplen/terminal` to interpret ANSI/VT output. A process-local session
+registry routes bounded input frames and close requests to the owning SSH
+channel; disconnecting the tab closes that channel. Jump and proxy routes,
+non-password credentials, reconnect ownership, and saved scrollback remain
+later connection slices.
 
 ## Localization
 
