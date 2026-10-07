@@ -13,6 +13,8 @@ On Windows, open a new PowerShell after installing Rust so `%USERPROFILE%\\.carg
 
 `pnpm dev` starts the frontend on port 5192 and opens the application window against it. The frontend alone (`pnpm --dir web/app dev`) shows the startup error screen, because there is no core to answer; use it only for layout work.
 
+The Tauri webview leaves `app.security.freezePrototype` disabled because the xterm.js renderer used by `@scoplen/terminal` installs a compatibility `toString` implementation during module initialization. Freezing JavaScript prototypes makes that import fail before React can render the startup screen.
+
 The app's `dev`, `build`, `typecheck`, and `test` scripts build the workspace terminal package first. A fresh checkout therefore does not need a separate `web/terminal` build before starting the client.
 
 `scoplen-proto` is a Git dependency of a private repository. Cargo fetches it through the git CLI and your GitHub credentials when `CARGO_NET_GIT_FETCH_WITH_CLI=true` is set; CI uses the `SCOPLEN_PROTO_TOKEN` repository secret, a token with read access to that repository.

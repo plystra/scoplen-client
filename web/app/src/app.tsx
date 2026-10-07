@@ -58,6 +58,7 @@ export function App() {
   return (
     <I18nProvider locale={locale}>
       <SkipTarget />
+      {startup.state === "loading" ? <StartupLoading /> : null}
       {startup.state === "ready" ? <Gate info={startup.info} status={startup.status} onStatus={setStatus} /> : null}
       {startup.state === "failed" ? <StartupError reference={startup.reference} onRetry={retry} /> : null}
     </I18nProvider>
@@ -67,6 +68,16 @@ export function App() {
 function SkipTarget() {
   const { t } = useI18n();
   return <SkipLink target="main">{t("shell.skip")}</SkipLink>;
+}
+
+function StartupLoading() {
+  const { t } = useI18n();
+  return (
+    <main id="main" className="mx-auto max-w-xl px-6 py-16" aria-busy="true" aria-live="polite">
+      <h1 className="font-serif text-xl font-medium">{t("startup.loading.title")}</h1>
+      <p className="mt-3 text-sm text-muted-foreground">{t("startup.loading.body")}</p>
+    </main>
+  );
 }
 
 /** Shows the screen the state of the local data calls for. */

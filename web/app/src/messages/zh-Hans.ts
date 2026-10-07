@@ -19,6 +19,8 @@ export const zhHans: Messages = {
   "startup.error.body": "窗口连不上应用核心，没有改动任何数据。请再试一次；如果还是失败，退出后重新打开 Scoplen。",
   "startup.error.reference": "参考信息：{reference}",
   "startup.error.retry": "再试一次",
+  "startup.loading.title": "正在启动 Scoplen",
+  "startup.loading.body": "正在连接应用核心……",
 
   "failed.body": "出了点问题，没有改动任何数据。请再试一次；如果一直失败，请附上这条参考信息反馈给我们。",
 

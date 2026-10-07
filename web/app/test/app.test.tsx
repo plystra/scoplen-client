@@ -39,6 +39,15 @@ function core(status: Status, handle: Handler = defaultInventory, locale: AppInf
 }
 
 describe("startup", () => {
+  it("shows progress while the core is still starting", () => {
+    mockIPC((cmd) => (cmd === "app_info" || cmd === "local_data_status" ? new Promise(() => undefined) : undefined), {
+      shouldMockEvents: true,
+    });
+    render(<App />);
+    expect(screen.getByRole("heading", { level: 1, name: "Starting Scoplen" })).toBeTruthy();
+    expect(screen.getByText("Connecting to the application core…")).toBeTruthy();
+  });
+
   it("opens on the hosts screen in the core's language and reports ready", async () => {
     const calls = core({ state: "open", protection: "keystore" }, undefined, "zh-Hans");
     const { container } = render(<App />);

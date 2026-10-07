@@ -21,6 +21,8 @@ export const en = {
     "The window could not reach the application core. Nothing was changed. Try again; if it fails again, quit and reopen Scoplen.",
   "startup.error.reference": "Reference: {reference}",
   "startup.error.retry": "Try again",
+  "startup.loading.title": "Starting Scoplen",
+  "startup.loading.body": "Connecting to the application core…",
 
   "failed.body":
     "Something went wrong. Nothing was changed. Try again; if it keeps failing, report it with this reference.",
