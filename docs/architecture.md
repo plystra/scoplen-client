@@ -74,6 +74,19 @@ Migration 3 adds `implicit_objects`, an encrypted, device-local visibility marke
 
 The empty Hosts list can open a native file picker and preview a limited OpenSSH config before writing. The Rust core reads a bounded UTF-8 file, separates representable literal `Host` blocks from skipped hosts, and reports unsupported directives with line numbers. `Include`, `Match`, wildcard hosts, or global rules can change the meaning of every block, so a file containing them yields a report without importable hosts. The frontend displays that report and sends the preview back for confirmation. The core re-reads and compares the source before import; if it changed, the user must preview again. Identity files and every host are validated before one atomic store transaction. The source config is never written. Complete OpenSSH import and idempotent re-import remain roadmap C10.
 
+## Direct SSH session
+
+`scoplen-client-core::connection` resolves an AccessProfile into a direct
+endpoint and device-local password material, then owns the concrete
+`scoplen-ssh` connection and session channels. The Tauri `session_connect`
+command reads active host-specific trust records before opening a socket;
+new, changed, revoked, wildcard-only, and CA records are rejected. Password
+authentication, one command, and an optional PTY shell are available now.
+Output is delivered as bounded binary frames (8 MiB aggregate per session),
+and command/input fields are bounded at 64 KiB. Jump and proxy routes,
+non-password credentials, reconnect ownership, and explicit first-use trust
+prompts remain later connection slices.
+
 ## Localization
 
 Messages are ICU MessageFormat catalogs in `web/app/src/messages`. English (`en.ts`) is the source; every other catalog has its type, so a missing key fails type checking, and the catalog tests format every message. The interface language is chosen in the core (`Locale::negotiate`) from the system's preferred languages: Simplified Chinese for `zh-Hans` and Simplified-script regions, otherwise English. A language setting arrives with Preference objects (roadmap C2).

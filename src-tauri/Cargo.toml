@@ -23,6 +23,7 @@ tauri-build.workspace = true
 scoplen-client-core.workspace = true
 scoplen-client-platform.workspace = true
 scoplen-model.workspace = true
+scoplen-ssh.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true

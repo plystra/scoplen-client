@@ -7,11 +7,31 @@
 //! (`scoplen-docs/11-client-architecture.md` §4). The frontend receives each
 //! frame as an `ArrayBuffer` (`web/app/src/ipc/frames.ts`).
 
-use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
+
+/// A raw binary frame sent through a Tauri channel.
+///
+/// The custom Specta definition keeps the generated frontend contract as
+/// `ArrayBuffer`, while the `IpcResponse` implementation preserves Tauri's
+/// raw response body instead of serializing bytes as JSON.
+#[derive(Debug)]
+pub struct RawFrame(pub Vec<u8>);
+
+impl specta::Type for RawFrame {
+    fn definition(_types: &mut specta::Types) -> specta::datatype::DataType {
+        specta_typescript::define("ArrayBuffer").into()
+    }
+}
+
+impl IpcResponse for RawFrame {
+    fn body(self) -> tauri::Result<InvokeResponseBody> {
+        Ok(InvokeResponseBody::Raw(self.0))
+    }
+}
 
 /// A channel that carries binary frames to the frontend.
 pub struct FrameSender {
-    channel: Channel<InvokeResponseBody>,
+    channel: Channel<RawFrame>,
 }
 
 /// The frontend closed the channel or its window went away.
@@ -21,19 +41,19 @@ pub struct ChannelClosed(#[source] tauri::Error);
 
 impl FrameSender {
     /// Wraps a channel received as a command argument.
-    pub fn new(channel: Channel<InvokeResponseBody>) -> FrameSender {
+    pub fn new(channel: Channel<RawFrame>) -> FrameSender {
         FrameSender { channel }
     }
 
     /// Sends one frame. Frames arrive in the order they are sent, each intact.
     pub fn send(&self, frame: impl Into<Vec<u8>>) -> Result<(), ChannelClosed> {
-        self.channel.send(InvokeResponseBody::Raw(frame.into())).map_err(ChannelClosed)
+        self.channel.send(RawFrame(frame.into())).map_err(ChannelClosed)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::FrameSender;
+    use super::{FrameSender, RawFrame};
     use std::sync::{Arc, Mutex};
     use tauri::ipc::{Channel, InvokeResponseBody};
 
@@ -41,7 +61,7 @@ mod tests {
     fn frames_are_sent_raw_and_in_order() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = received.clone();
-        let channel = Channel::new(move |body| {
+        let channel: Channel<RawFrame> = Channel::new(move |body| {
             sink.lock().unwrap().push(body);
             Ok(())
         });

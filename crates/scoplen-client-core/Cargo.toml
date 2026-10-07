@@ -10,13 +10,17 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
 rusqlite.workspace = true
 scoplen-client-platform.workspace = true
 scoplen-crypto.workspace = true
 scoplen-model.workspace = true
+scoplen-ssh.workspace = true
 serde.workspace = true
+sha2.workspace = true
 specta.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

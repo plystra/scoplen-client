@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
 
+use crate::connection::{ConnectionPlan, ConnectionPlanError, resolve_connection_plan};
 use crate::repository::{
     AccessProfile, AccessProfileChange, Change, Credential, CredentialBinding, CredentialChange,
     CredentialKind, Edit, Forward, Host, HostChange, HostGroup, HostGroupChange, RecordError,
@@ -1704,6 +1705,17 @@ impl Inventory {
                 })
             })
             .collect())
+    }
+
+    /// Resolves one AccessProfile into the local inputs required by the SSH
+    /// adapter. This performs no network I/O and does not create a session.
+    pub fn connection_plan(
+        &self,
+        profile_id: String,
+    ) -> Result<ConnectionPlan, ConnectionPlanError> {
+        let profile_id =
+            Uuid::parse_str(&profile_id).map_err(|_| ConnectionPlanError::InvalidProfileId)?;
+        resolve_connection_plan(&self.store, profile_id)
     }
 
     /// Records the opening of a session after validating its live login.
