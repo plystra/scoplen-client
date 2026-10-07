@@ -30,7 +30,7 @@ can bound transport memory even when a profile keeps a larger scrollback.
 ## Lifecycle
 
 1. `connectedCallback` creates xterm.js, loads the search addon, installs input
-   listeners, and subscribes to the source.
+   and IME listeners, and subscribes to the source.
 2. Source chunks are copied, emitted as `terminal-output`, retained under the
    byte cap, and written to xterm.js.
 3. xterm `onData` and `onBinary` input is converted to `Uint8Array` and enters
@@ -54,6 +54,10 @@ emulator and does not claim full-screen program compatibility.
   used only as a capability fallback.
 - **Clipboard:** read/write operations are injected or use `navigator.clipboard`.
   Permission errors return `false` and emit a typed `clipboard` error.
+- **IME:** composition events outside xterm.js' helper textarea pass through a
+  DOM-free `TerminalImeCompositionBridge`. Candidate updates are discarded;
+  only non-empty `compositionend` data reaches the sink. Cancellation, blur,
+  and disconnection clear the pending composition.
 - **Broadcast:** enabling requires an explicit confirmation callback. A
   secondary caller-owned sink receives copies of primary input and cannot make
   the primary write fail. The visible status indicator and events make the mode

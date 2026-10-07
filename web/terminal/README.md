@@ -7,11 +7,11 @@ sink and decide which session or transport they represent.
 
 The package now provides the first terminal experience slice: xterm.js core
 emulation with bounded output retention and scrollback, search, copy and paste,
-profiles, accessible fallback rendering, and explicitly confirmed broadcast
-input. `TerminalWorkspace` provides tabs and split-pane layout state without
-pretending to create a connection. WebGL, Unicode width addons, serialization,
-image protocols, platform-wide IME verification, and the compatibility suite
-remain planned work.
+profiles, accessible fallback rendering, explicitly confirmed broadcast input,
+and a DOM-free IME composition bridge. `TerminalWorkspace` provides tabs and
+split-pane layout state without pretending to create a connection. WebGL,
+Unicode width addons, serialization, image protocols, platform-wide IME
+verification, and the compatibility suite remain planned work.
 
 ## Direct custom element
 
@@ -72,6 +72,19 @@ scrollback. `copySelection`, `copyAll`, and `paste` use the browser clipboard
 by default or an injected `terminal.clipboard` implementation. Clipboard
 permission or availability failures emit a `TerminalError` with code
 `clipboard` and return `false`.
+
+### IME composition
+
+`TerminalImeCompositionBridge` is a small, DOM-free state machine for hosts
+that need to adapt browser or native composition events. `start()` and
+`update()` never write candidate text to the terminal sink; `end(data)`
+writes only the committed, non-empty final text. `cancel()` and `blur()`
+discard a pending composition so a late `compositionend` cannot leak
+candidate text after focus changes. The custom element uses this bridge for
+events outside xterm.js' helper textarea and delegates helper-textarea events
+to xterm.js, preventing duplicate writes. The bridge is testable in a browser
+or a no-DOM host; platform-specific IME behavior still requires desktop
+verification.
 
 ### Broadcast input
 
