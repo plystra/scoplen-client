@@ -5,9 +5,13 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
+    "predev": "pnpm --filter @scoplen/terminal build",
     "dev": "vite",
+    "prebuild": "pnpm --filter @scoplen/terminal build",
     "build": "tsc --noEmit && vite build",
+    "pretypecheck": "pnpm --filter @scoplen/terminal build",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm --filter @scoplen/terminal build",
     "test": "vitest run"
   },
   "dependencies": {

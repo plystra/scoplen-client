@@ -11,6 +11,8 @@ pnpm dev
 
 `pnpm dev` starts the frontend on port 5192 and opens the application window against it. The frontend alone (`pnpm --dir web/app dev`) shows the startup error screen, because there is no core to answer; use it only for layout work.
 
+The app's `dev`, `build`, `typecheck`, and `test` scripts build the workspace terminal package first. A fresh checkout therefore does not need a separate `web/terminal` build before starting the client.
+
 `scoplen-proto` is a Git dependency of a private repository. Cargo fetches it through the git CLI and your GitHub credentials when `CARGO_NET_GIT_FETCH_WITH_CLI=true` is set; CI uses the `SCOPLEN_PROTO_TOKEN` repository secret, a token with read access to that repository.
 
 Set `SPL_DATA_DIR` to run the application against a separate data directory, for example a temporary one; the default is the platform's application data directory. On macOS the key of each data directory is a separate Keychain item, service `com.scoplen.client`, account `local-database-key:<directory>`.
