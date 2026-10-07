@@ -434,6 +434,32 @@ pub struct RouteInput {
     pub definition: RouteDefinition,
 }
 
+/// The direction of a saved tunnel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ForwardKindInput {
+    /// Listen locally and connect to the remote target.
+    Local,
+    /// Listen remotely and connect back to the local target.
+    Remote,
+    /// Listen locally as a SOCKS proxy.
+    Dynamic,
+}
+
+/// A redacted saved tunnel that can be attached to an access profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardSummary {
+    /// The tunnel identifier.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Tunnel direction.
+    pub kind: ForwardKindInput,
+    /// The optional default profile configured on the tunnel.
+    pub profile: Option<String>,
+}
+
 /// A standalone access profile with its host and redacted references.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -462,6 +488,8 @@ pub struct AccessProfileSummary {
     pub startup_command: Option<String>,
     /// Whether agent forwarding is enabled.
     pub agent_forwarding: bool,
+    /// Saved tunnels started automatically with this login.
+    pub forwards: Vec<String>,
     /// Whether this is the host's default profile.
     pub is_default: bool,
     /// Whether one of this profile's referenced objects is missing or deleted.
@@ -490,6 +518,8 @@ pub struct AccessProfileInput {
     pub startup_command: Option<String>,
     /// Agent forwarding toggle.
     pub agent_forwarding: bool,
+    /// Complete replacement for saved tunnels started with this login.
+    pub forwards: Vec<String>,
     /// Make this the host's default profile.
     pub default_profile: bool,
 }
@@ -949,9 +979,10 @@ impl Inventory {
         let hosts = self.host_records().map_err(object_from_failure)?;
         let credentials = self.credentials().map_err(object_from_failure)?;
         let routes = self.routes().map_err(object_from_failure)?;
+        let forwards = self.forwards().map_err(object_from_failure)?;
         let mut result = profiles
             .iter()
-            .map(|profile| profile_summary(profile, &hosts, &credentials, &routes))
+            .map(|profile| profile_summary(profile, &hosts, &credentials, &routes, &forwards))
             .collect::<Result<Vec<_>, _>>()?;
         result.sort_by(|left, right| {
             left.host_name
@@ -976,7 +1007,8 @@ impl Inventory {
         let hosts = self.host_records().map_err(object_from_failure)?;
         let credentials = self.credentials().map_err(object_from_failure)?;
         let routes = self.routes().map_err(object_from_failure)?;
-        Ok(Some(profile_summary(&profile, &hosts, &credentials, &routes)?))
+        let forwards = self.forwards().map_err(object_from_failure)?;
+        Ok(Some(profile_summary(&profile, &hosts, &credentials, &routes, &forwards)?))
     }
 
     /// Restores the tombstoned host that leaves an access profile orphaned.
@@ -1063,6 +1095,19 @@ impl Inventory {
         Ok(result)
     }
 
+    /// Lists saved tunnels that can be attached to an access profile.
+    pub fn forwards_objects(&self) -> Result<Vec<ForwardSummary>, ObjectEditError> {
+        let mut result = self
+            .forwards()
+            .map_err(object_from_failure)?
+            .iter()
+            .map(forward_summary)
+            .collect::<Vec<_>>();
+        result
+            .sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
+        Ok(result)
+    }
+
     /// Reads one route.
     pub fn route_object(&self, route_id: String) -> Result<Option<RouteSummary>, ObjectEditError> {
         let id = parse_object_id(&route_id, "route")?;
@@ -1091,8 +1136,8 @@ impl Inventory {
             route: Some(validated.route),
             terminal_profile: Edit::from_option(validated.terminal_profile),
             startup_command: Edit::from_option(validated.startup_command),
+            forwards: validated.forwards.into_iter().map(|forward| (forward, true)).collect(),
             agent_forwarding: Some(validated.agent_forwarding),
-            ..Default::default()
         }
         .into_writes()
         .map_err(object_from_record)?;
@@ -1165,8 +1210,8 @@ impl Inventory {
             route: Some(validated.route),
             terminal_profile: Edit::from_option(validated.terminal_profile),
             startup_command: Edit::from_option(validated.startup_command),
+            forwards: validated.forwards.into_iter().map(|forward| (forward, true)).collect(),
             agent_forwarding: Some(validated.agent_forwarding),
-            ..Default::default()
         }
         .into_writes()
         .map_err(object_from_record)?;
@@ -1445,6 +1490,17 @@ impl Inventory {
                 RouteChoice::Route(id)
             }
         };
+        let forwards = input
+            .forwards
+            .iter()
+            .map(|value| parse_object_id(value, "forward"))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let available_forwards = Repository::<Forward>::new(&self.store);
+        for forward in &forwards {
+            if available_forwards.get(*forward).map_err(object_from_record)?.is_none() {
+                return Err(object_not_found("forward"));
+            }
+        }
         // A profile may not be changed into a self-referential route through a
         // malformed pre-existing object. The optional id is reserved for a
         // future stricter route expansion check and keeps validation explicit.
@@ -1457,6 +1513,7 @@ impl Inventory {
             route,
             terminal_profile,
             startup_command,
+            forwards,
             agent_forwarding: input.agent_forwarding,
         })
     }
@@ -2401,6 +2458,10 @@ impl Inventory {
         Repository::<Route>::new(&self.store).list().map_err(failure)
     }
 
+    fn forwards(&self) -> Result<Vec<Forward>, Failure> {
+        Repository::<Forward>::new(&self.store).list().map_err(failure)
+    }
+
     fn recent_hosts(&self, profiles: &[AccessProfile]) -> Result<BTreeSet<Uuid>, Failure> {
         let recent = self.store.recent_sessions(1000).map_err(failure)?;
         Ok(recent
@@ -2421,6 +2482,7 @@ struct ValidatedProfile {
     route: RouteChoice,
     terminal_profile: Option<String>,
     startup_command: Option<String>,
+    forwards: BTreeSet<Uuid>,
     agent_forwarding: bool,
 }
 
@@ -2669,6 +2731,7 @@ fn profile_summary(
     hosts: &[Host],
     credentials: &[Credential],
     routes: &[Route],
+    forwards: &[Forward],
 ) -> Result<AccessProfileSummary, ObjectEditError> {
     let host = hosts.iter().find(|host| host.meta.id == profile.host);
     let credential = profile
@@ -2682,6 +2745,10 @@ fn profile_summary(
     let missing_host = host.is_none();
     let missing_credential = profile.credential.is_some() && credential.is_none();
     let missing_route = matches!(profile.route, RouteChoice::Route(route) if !routes.iter().any(|item| item.meta.id == route));
+    let missing_forward = profile
+        .forwards
+        .iter()
+        .any(|forward| !forwards.iter().any(|item| item.meta.id == *forward));
     Ok(AccessProfileSummary {
         id: id(profile.meta.id),
         host: id(profile.host),
@@ -2695,10 +2762,24 @@ fn profile_summary(
         terminal_profile: profile.terminal_profile.clone(),
         startup_command: profile.startup_command.clone(),
         agent_forwarding: profile.agent_forwarding,
+        forwards: profile.forwards.iter().copied().map(id).collect(),
         is_default: host.is_some_and(|host| host.default_profile == Some(profile.meta.id)),
-        orphaned: missing_host || missing_credential || missing_route,
+        orphaned: missing_host || missing_credential || missing_route || missing_forward,
         restored: profile.meta.restored,
     })
+}
+
+fn forward_summary(forward: &Forward) -> ForwardSummary {
+    ForwardSummary {
+        id: id(forward.meta.id),
+        name: forward.name.clone(),
+        kind: match forward.kind {
+            crate::repository::ForwardKind::Local => ForwardKindInput::Local,
+            crate::repository::ForwardKind::Remote => ForwardKindInput::Remote,
+            crate::repository::ForwardKind::Dynamic => ForwardKindInput::Dynamic,
+        },
+        profile: forward.profile.map(id),
+    }
 }
 
 fn summary(host: &Host, profiles: &[AccessProfile], routes: &[Route]) -> HostSummary {
@@ -3816,6 +3897,7 @@ mod tests {
                     route: Some(route.id.clone()),
                     terminal_profile: None,
                     startup_command: None,
+                    forwards: Vec::new(),
                     agent_forwarding: false,
                     default_profile: true,
                 },
@@ -3862,11 +3944,66 @@ mod tests {
                     route: Some(route.id.clone()),
                     terminal_profile: None,
                     startup_command: None,
+                    forwards: Vec::new(),
                     agent_forwarding: false,
                     default_profile: false,
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn access_profile_forwards_round_trip_and_invalid_reference_is_atomic() {
+        let inventory = inventory();
+        let host = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let profile_id = host.logins[0].id.clone();
+        let forward = Repository::<Forward>::new(&inventory.store)
+            .create(ForwardChange {
+                name: Some("postgres".into()),
+                kind: Some(ForwardKind::Local),
+                ..Default::default()
+            })
+            .unwrap();
+        let forward_id = id(forward.meta.id);
+        let input = |forwards| AccessProfileInput {
+            host: host.summary.id.clone(),
+            name: None,
+            username: "ops".into(),
+            credential: None,
+            route: None,
+            terminal_profile: None,
+            startup_command: None,
+            forwards,
+            agent_forwarding: false,
+            default_profile: false,
+        };
+
+        let edited = inventory
+            .update_access_profile(
+                profile_id.clone(),
+                input(vec![forward_id.clone(), forward_id.clone()]),
+            )
+            .unwrap();
+        assert_eq!(edited.forwards, vec![forward_id.clone()]);
+        assert_eq!(inventory.forwards_objects().unwrap()[0].name, "postgres");
+
+        let missing = id(scoplen_model::new_uuid_v7().unwrap());
+        assert_eq!(
+            inventory.update_access_profile(profile_id.clone(), input(vec![missing])),
+            Err(ObjectEditError::NotFound { entity: "forward".into() })
+        );
+        assert_eq!(
+            inventory.access_profile(profile_id).unwrap().unwrap().forwards,
+            vec![forward_id]
+        );
     }
 
     #[test]
@@ -4116,6 +4253,7 @@ mod tests {
                         route: None,
                         terminal_profile: None,
                         startup_command: None,
+                        forwards: Vec::new(),
                         agent_forwarding: false,
                         default_profile: false,
                     },
@@ -4196,6 +4334,7 @@ mod tests {
                     route: None,
                     terminal_profile: None,
                     startup_command: None,
+                    forwards: Vec::new(),
                     agent_forwarding: false,
                     default_profile: false,
                 },
@@ -4224,6 +4363,7 @@ mod tests {
                     route: None,
                     terminal_profile: None,
                     startup_command: None,
+                    forwards: Vec::new(),
                     agent_forwarding: false,
                     default_profile: false,
                 },

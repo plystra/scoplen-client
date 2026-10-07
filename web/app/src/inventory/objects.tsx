@@ -12,6 +12,7 @@ import {
   type CredentialKindInput,
   type CredentialSummary,
   type Failure,
+  type ForwardSummary,
   type HostSummary,
   type Id,
   type ObjectEditError,
@@ -51,6 +52,7 @@ export function InventoryObjects({ section: initialSection, onBack }: { section:
   const profiles = useLoad(() => objectLoad(api.accessProfiles()), "access-profiles");
   const credentials = useLoad(() => objectLoad(api.credentials()), "credentials");
   const routes = useLoad(() => objectLoad(api.routes()), "routes");
+  const forwards = useLoad(() => objectLoad(api.forwards()), "forwards");
   const hosts = useLoad(() => api.hosts({ kind: "all" }, ""), "all-hosts");
 
   const title =
@@ -162,6 +164,7 @@ export function InventoryObjects({ section: initialSection, onBack }: { section:
             <ProfileList
               data={profiles}
               routes={routes}
+              forwards={forwards}
               onEdit={(id) => setEditing({ kind: "logins", id })}
               onDelete={setDeleting}
               onRestore={(objectId, rowId) => void restoreOrphanedObject(objectId, rowId)}
@@ -197,6 +200,7 @@ export function InventoryObjects({ section: initialSection, onBack }: { section:
           hosts={hosts}
           credentials={credentials}
           routes={routes}
+          forwards={forwards}
           onClose={() => setEditing(null)}
           onSaved={onSaved}
         />
@@ -255,6 +259,7 @@ export function InventoryObjects({ section: initialSection, onBack }: { section:
 function ProfileList({
   data,
   routes,
+  forwards,
   onEdit,
   onDelete,
   onRestore,
@@ -263,6 +268,7 @@ function ProfileList({
 }: {
   data: Loaded<AccessProfileSummary[]>;
   routes: Loaded<RouteSummary[]>;
+  forwards: Loaded<ForwardSummary[]>;
   onEdit: (id: Id) => void;
   onDelete: (item: Deleting) => void;
   onRestore: (objectId: Id, rowId: Id) => void;
@@ -282,7 +288,7 @@ function ProfileList({
     >
       {profiles.map((profile) => {
         const name = profile.name ?? (orphan ? profile.username : `${profile.username}@${profile.hostName}`);
-        const restoreTarget = orphan ? profileOrphanRestoreTarget(profile, routes) : null;
+        const restoreTarget = orphan ? profileOrphanRestoreTarget(profile, routes, forwards) : null;
         const missingLabel =
           profile.hostName === null
             ? t("objects.orphaned.missingHost")
@@ -292,7 +298,12 @@ function ProfileList({
                   routes.state === "ready" &&
                   !routes.data.some((route) => route.id === profile.routeId)
                 ? t("objects.orphaned.missingRoute")
-                : t("objects.orphaned.missingObject");
+                : profile.forwards.some(
+                      (forwardId) =>
+                        forwards.state === "ready" && !forwards.data.some((forward) => forward.id === forwardId),
+                    )
+                  ? t("objects.orphaned.missingForward")
+                  : t("objects.orphaned.missingObject");
         return (
           <li key={profile.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
             <div className="min-w-0 flex-1">
@@ -304,6 +315,9 @@ function ProfileList({
               </p>
               <p className="m-0 text-xs text-muted-foreground">
                 {profile.isDefault ? t("objects.profile.default") : ""}
+                {profile.forwards.length > 0
+                  ? `${profile.isDefault ? " · " : ""}${t("objects.profile.forwardCount", { count: profile.forwards.length })}`
+                  : ""}
                 {profile.restored ? ` · ${t("hosts.restored")}` : ""}
                 {restoreError?.id === profile.id ? ` · ${restoreError.message}` : ""}
               </p>
@@ -339,11 +353,19 @@ function ProfileList({
   );
 }
 
-function profileOrphanRestoreTarget(profile: AccessProfileSummary, routes: Loaded<RouteSummary[]>): Id | null {
+function profileOrphanRestoreTarget(
+  profile: AccessProfileSummary,
+  routes: Loaded<RouteSummary[]>,
+  forwards: Loaded<ForwardSummary[]>,
+): Id | null {
   if (profile.hostName === null) return profile.host;
   if (profile.credentialId && !profile.credential) return profile.credentialId;
   if (profile.routeId && (routes.state !== "ready" || !routes.data.some((route) => route.id === profile.routeId))) {
     return profile.routeId;
+  }
+  if (forwards.state === "ready") {
+    const missing = profile.forwards.find((forward) => !forwards.data.some((item) => item.id === forward));
+    if (missing) return missing;
   }
   return null;
 }
@@ -664,6 +686,7 @@ function ProfileEditor({
   hosts,
   credentials,
   routes,
+  forwards,
   onClose,
   onSaved,
 }: {
@@ -672,6 +695,7 @@ function ProfileEditor({
   hosts: Loaded<HostSummary[]>;
   credentials: Loaded<CredentialSummary[]>;
   routes: Loaded<RouteSummary[]>;
+  forwards: Loaded<ForwardSummary[]>;
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
@@ -689,6 +713,7 @@ function ProfileEditor({
           terminalProfile: existing.terminalProfile,
           startupCommand: existing.startupCommand,
           agentForwarding: existing.agentForwarding,
+          forwards: [...existing.forwards],
           defaultProfile: existing.isDefault,
         }
       : {
@@ -700,6 +725,7 @@ function ProfileEditor({
           terminalProfile: null,
           startupCommand: null,
           agentForwarding: false,
+          forwards: [],
           defaultProfile: false,
         },
   );
@@ -739,6 +765,7 @@ function ProfileEditor({
       error={error}
       onClose={onClose}
       onSave={() => void save()}
+      canSave={forwards.state === "ready"}
     >
       <SelectField
         label={t("objects.profile.host")}
@@ -780,6 +807,44 @@ function ProfileEditor({
         value={value.startupCommand ?? ""}
         onChange={(event) => setValue((current) => ({ ...current, startupCommand: event.target.value || null }))}
       />
+      <fieldset className="flex flex-col gap-2" disabled={forwards.state !== "ready"}>
+        <legend className="text-sm font-medium text-foreground">{t("objects.profile.forwards")}</legend>
+        <p className="m-0 text-sm text-muted-foreground">{t("objects.profile.forwardsHint")}</p>
+        {forwards.state === "loading" ? (
+          <p className="m-0 text-sm text-muted-foreground">{t("objects.loading")}</p>
+        ) : null}
+        {forwards.state === "failed" ? <FailureNotice reference={forwards.reference} /> : null}
+        {forwards.state === "ready" && forwards.data.length === 0 ? (
+          <p className="m-0 text-sm text-muted-foreground">{t("objects.profile.noForwards")}</p>
+        ) : null}
+        {forwards.state === "ready"
+          ? forwards.data.map((forward) => {
+              const checkboxId = `profile-forward-${forward.id}`;
+              return (
+                <label key={forward.id} htmlFor={checkboxId} className="flex items-start gap-2 text-sm">
+                  <input
+                    id={checkboxId}
+                    type="checkbox"
+                    checked={value.forwards.includes(forward.id)}
+                    onChange={(event) =>
+                      setValue((current) => ({
+                        ...current,
+                        forwards: event.target.checked
+                          ? [...new Set([...current.forwards, forward.id])]
+                          : current.forwards.filter((id) => id !== forward.id),
+                      }))
+                    }
+                    className="mt-0.5 size-4 accent-[var(--primary)]"
+                  />
+                  <span>
+                    <span className="block">{forward.name}</span>
+                    <span className="block text-xs text-muted-foreground">{forwardKindText(t, forward.kind)}</span>
+                  </span>
+                </label>
+              );
+            })
+          : null}
+      </fieldset>
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
@@ -1191,6 +1256,17 @@ function routeKindText(t: Translator, kind: RouteDefinition["kind"]): string {
       return t("objects.route.kind.command");
     case "managed":
       return t("objects.route.kind.managed");
+  }
+}
+
+function forwardKindText(t: Translator, kind: ForwardSummary["kind"]): string {
+  switch (kind) {
+    case "local":
+      return t("objects.forward.kind.local");
+    case "remote":
+      return t("objects.forward.kind.remote");
+    case "dynamic":
+      return t("objects.forward.kind.dynamic");
   }
 }
 

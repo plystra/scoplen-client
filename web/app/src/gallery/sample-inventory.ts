@@ -12,6 +12,7 @@ import type {
   CredentialInput,
   CredentialSummary,
   EditHost,
+  ForwardSummary,
   GroupSummary,
   GroupInput,
   HostDetails,
@@ -145,6 +146,12 @@ const sampleRouteSeeds: RouteSummary[] = [
   },
 ];
 
+const sampleForwardSeeds: ForwardSummary[] = [
+  { id: "f-db", name: "postgres-prod", kind: "local", profile: "l-3" },
+  { id: "f-socks", name: "staging-socks", kind: "dynamic", profile: null },
+  { id: "f-remote", name: "metrics-remote", kind: "remote", profile: "l-5" },
+];
+
 function login(
   id: Id,
   username: string,
@@ -210,6 +217,7 @@ function profileSeeds(hosts: HostDetails[]): AccessProfileSummary[] {
       terminalProfile: null,
       startupCommand: null,
       agentForwarding: false,
+      forwards: current.id === "h-db-1" ? ["f-db"] : current.id === "h-stg-web" ? ["f-remote"] : [],
       isDefault: loginSummary.isDefault,
       orphaned: false,
       restored: current.restored,
@@ -385,6 +393,7 @@ export function sampleInventory(
     ...route,
     definition: { ...route.definition } as RouteDefinition,
   }));
+  const objectForwards = sampleForwardSeeds.map((forward) => ({ ...forward }));
   let sessionSequence = 0;
   const deleted = new Map<string, HostDetails>();
   const listeners = new Set<() => void>();
@@ -634,6 +643,7 @@ export function sampleInventory(
       return wait(ok(updated));
     },
     accessProfiles: () => wait(ok(profileRows())),
+    forwards: () => wait(ok(objectForwards.map((forward) => ({ ...forward })))),
     createAccessProfile: (input: AccessProfileInput) => {
       const currentHost = hosts.find((host) => host.id === input.host);
       if (!currentHost) return wait(objectEditFailure("host not found"));
@@ -643,6 +653,10 @@ export function sampleInventory(
       }
       if (input.route && !objectRoutes.some((route) => route.id === input.route)) {
         return wait({ status: "error" as const, error: { kind: "invalidRoute" as const } });
+      }
+      const forwards = [...new Set(input.forwards)];
+      if (forwards.some((forwardId) => !objectForwards.some((forward) => forward.id === forwardId))) {
+        return wait({ status: "error" as const, error: { kind: "notFound" as const, entity: "forward" } });
       }
       const id = `l-${Date.now()}`;
       if (input.defaultProfile)
@@ -667,6 +681,7 @@ export function sampleInventory(
         terminalProfile: input.terminalProfile?.trim() || null,
         startupCommand: input.startupCommand?.trim() || null,
         agentForwarding: input.agentForwarding,
+        forwards,
         isDefault: input.defaultProfile,
         orphaned: false,
         restored: false,
@@ -685,6 +700,10 @@ export function sampleInventory(
       }
       if (input.route && !objectRoutes.some((route) => route.id === input.route)) {
         return wait({ status: "error" as const, error: { kind: "invalidRoute" as const } });
+      }
+      const forwards = [...new Set(input.forwards)];
+      if (forwards.some((forwardId) => !objectForwards.some((forward) => forward.id === forwardId))) {
+        return wait({ status: "error" as const, error: { kind: "notFound" as const, entity: "forward" } });
       }
       if (input.defaultProfile)
         profiles = profiles.map((profile) => ({
@@ -708,6 +727,7 @@ export function sampleInventory(
         terminalProfile: input.terminalProfile?.trim() || null,
         startupCommand: input.startupCommand?.trim() || null,
         agentForwarding: input.agentForwarding,
+        forwards,
         isDefault: input.defaultProfile,
       };
       profiles = profiles.map((profile) => (profile.id === id ? updated : profile));
