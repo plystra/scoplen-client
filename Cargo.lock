@@ -1101,7 +1101,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1379,7 +1379,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2783,7 +2783,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4082,7 +4082,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4225,7 +4225,7 @@ dependencies = [
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=7b20176#7b20176ad29046b270e99991e3a6b45b76b5afb6"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=97bd3a3#97bd3a370fad227e9a9baf4e713d57116f090d9f"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -4250,7 +4250,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=7b20176#7b20176ad29046b270e99991e3a6b45b76b5afb6"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=97bd3a3#97bd3a370fad227e9a9baf4e713d57116f090d9f"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -4264,7 +4264,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-ssh"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=7b20176#7b20176ad29046b270e99991e3a6b45b76b5afb6"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=97bd3a3#97bd3a370fad227e9a9baf4e713d57116f090d9f"
 dependencies = [
  "russh",
  "scoplen-crypto",
@@ -4647,7 +4647,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5343,7 +5343,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5659,7 +5659,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6041,7 +6041,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6062,7 +6062,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "raw-window-handle",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "windows-version",
 ]
 
@@ -6432,7 +6432,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
