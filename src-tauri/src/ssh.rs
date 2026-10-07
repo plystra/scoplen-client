@@ -8,6 +8,7 @@ use crate::local_data::LocalDataState;
 use scoplen_client_core::connection::{
     HostKeyPresentation, HostKeyStatus, HostKeyTrust, SshConnection, SshConnectionError,
     SshExecOutput, SshSession, StoredHostKeyVerifier, evaluate_host_key, probe_host_key,
+    terminal_size,
 };
 use scoplen_client_core::inventory::{DeletionStore, Inventory};
 use scoplen_client_core::repository::{
@@ -28,7 +29,13 @@ const SESSION_COMMAND_QUEUE: usize = 64;
 #[derive(Debug, Eq, PartialEq)]
 enum SessionCommand {
     Input(Vec<u8>),
+    Resize { columns: u32, rows: u32 },
     Close,
+}
+
+struct SessionEntry {
+    sender: Sender<SessionCommand>,
+    pty: bool,
 }
 
 /// Routes frontend session commands to their owning SSH connection task.
@@ -38,11 +45,11 @@ enum SessionCommand {
 /// untrusted renderer cannot grow memory without limit.
 #[derive(Default)]
 pub struct SessionRegistry {
-    sessions: Mutex<HashMap<String, Sender<SessionCommand>>>,
+    sessions: Mutex<HashMap<String, SessionEntry>>,
 }
 
 impl SessionRegistry {
-    fn register(&self, session_id: &str) -> Result<Receiver<SessionCommand>, String> {
+    fn register(&self, session_id: &str, pty: bool) -> Result<Receiver<SessionCommand>, String> {
         if session_id.trim().is_empty() {
             return Err("session id must not be empty".to_owned());
         }
@@ -52,7 +59,7 @@ impl SessionRegistry {
         if sessions.contains_key(session_id) {
             return Err("session is already connected".to_owned());
         }
-        sessions.insert(session_id.to_owned(), sender);
+        sessions.insert(session_id.to_owned(), SessionEntry { sender, pty });
         Ok(receiver)
     }
 
@@ -63,13 +70,15 @@ impl SessionRegistry {
     }
 
     fn send(&self, session_id: &str, command: SessionCommand) -> Result<(), String> {
-        let sender = self
-            .sessions
-            .lock()
-            .map_err(|_| "session registry is unavailable".to_owned())?
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| "session is not connected".to_owned())?;
+        let sessions =
+            self.sessions.lock().map_err(|_| "session registry is unavailable".to_owned())?;
+        let entry =
+            sessions.get(session_id).ok_or_else(|| "session is not connected".to_owned())?;
+        if matches!(command, SessionCommand::Resize { .. }) && !entry.pty {
+            return Err("session has no PTY to resize".to_owned());
+        }
+        let sender = entry.sender.clone();
+        drop(sessions);
         sender.try_send(command).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => "session command queue is full".to_owned(),
             mpsc::error::TrySendError::Closed(_) => "session is no longer connected".to_owned(),
@@ -204,7 +213,8 @@ pub async fn session_connect(
     session_id: String,
     frames: Channel<RawFrame>,
 ) -> Result<(), String> {
-    let mut commands = if command.is_none() { Some(registry.register(&session_id)?) } else { None };
+    let mut commands =
+        if command.is_none() { Some(registry.register(&session_id, pty)?) } else { None };
     let result =
         session_connect_inner(&local, profile_id, command, pty, frames, commands.as_mut()).await;
     if commands.is_some() {
@@ -225,6 +235,19 @@ pub fn session_input(
         return Err("session input exceeds the 64 KiB limit".to_owned());
     }
     registry.send(&session_id, SessionCommand::Input(data))
+}
+
+/// Notifies a live SSH PTY of a new character-cell size.
+#[tauri::command]
+#[specta::specta]
+pub fn session_resize(
+    registry: tauri::State<'_, SessionRegistry>,
+    session_id: String,
+    columns: u32,
+    rows: u32,
+) -> Result<(), String> {
+    terminal_size(columns, rows).map_err(display_connection_error)?;
+    registry.send(&session_id, SessionCommand::Resize { columns, rows })
 }
 
 /// Closes the transport for a live shell session.
@@ -307,6 +330,9 @@ async fn stream_channel(
                 Some(SessionCommand::Input(data)) => {
                     session.send_data(&data).await.map_err(display_connection_error)?;
                 }
+                Some(SessionCommand::Resize { columns, rows }) => {
+                    session.resize(columns, rows).await.map_err(display_connection_error)?;
+                }
                 Some(SessionCommand::Close) | None => {
                     session.close().await.map_err(display_connection_error)?;
                     break;
@@ -341,15 +367,25 @@ mod tests {
     #[test]
     fn registry_routes_commands_and_rejects_duplicate_sessions() {
         let registry = SessionRegistry::default();
-        assert_eq!(registry.register(" ").unwrap_err(), "session id must not be empty");
+        assert_eq!(registry.register(" ", true).unwrap_err(), "session id must not be empty");
 
-        let mut receiver = registry.register("session-1").expect("register session");
-        assert_eq!(registry.register("session-1").unwrap_err(), "session is already connected");
+        let mut receiver = registry.register("session-1", true).expect("register session");
+        assert_eq!(
+            registry.register("session-1", true).unwrap_err(),
+            "session is already connected"
+        );
         registry.send("session-1", SessionCommand::Input(vec![1, 2, 3])).expect("route input");
+        registry
+            .send("session-1", SessionCommand::Resize { columns: 120, rows: 40 })
+            .expect("route resize");
         registry.send("session-1", SessionCommand::Close).expect("route close");
         assert_eq!(
             receiver.try_recv().expect("input command"),
             SessionCommand::Input(vec![1, 2, 3])
+        );
+        assert_eq!(
+            receiver.try_recv().expect("resize command"),
+            SessionCommand::Resize { columns: 120, rows: 40 }
         );
         assert_eq!(receiver.try_recv().expect("close command"), SessionCommand::Close);
 
@@ -358,5 +394,18 @@ mod tests {
             registry.send("session-1", SessionCommand::Close).unwrap_err(),
             "session is not connected"
         );
+    }
+
+    #[test]
+    fn registry_rejects_resize_without_pty() {
+        let registry = SessionRegistry::default();
+        let mut receiver = registry.register("session-2", false).expect("register session");
+        assert_eq!(
+            registry
+                .send("session-2", SessionCommand::Resize { columns: 120, rows: 40 })
+                .unwrap_err(),
+            "session has no PTY to resize"
+        );
+        assert!(receiver.try_recv().is_err());
     }
 }

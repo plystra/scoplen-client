@@ -30,6 +30,7 @@ pub fn ipc() -> Builder<tauri::Wry> {
             ssh::session_trust_host_key,
             ssh::session_connect,
             ssh::session_input,
+            ssh::session_resize,
             ssh::session_close_transport,
             inventory::inventory_areas,
             inventory::inventory_groups,
