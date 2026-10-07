@@ -400,6 +400,44 @@ export function sampleInventory(
       return wait(ok(null));
     },
     chooseKeyFile: () => wait("/Users/mia/.ssh/id_ed25519"),
+    chooseOpenSshConfig: () => wait("/Users/mia/.ssh/config"),
+    previewOpenSshConfig: (path) =>
+      wait(
+        ok({
+          path,
+          entries: [
+            { alias: "prod-api", address: "prod.example.com", port: 22, username: "deploy", identityFile: null },
+          ],
+          skippedHosts: [
+            { alias: "legacy", line: 5, reason: { kind: "unsupportedDirective", directive: "ForwardAgent" } },
+          ],
+          unsupported: [{ line: 7, directive: "ForwardAgent" }],
+        }),
+      ),
+    importOpenSshConfig: (preview) => {
+      if (hosts.length > 0) return wait({ status: "error" as const, error: { kind: "inventoryNotEmpty" as const } });
+      if (preview.entries.length === 0) return wait({ status: "error" as const, error: { kind: "noHosts" as const } });
+      const imported = host({
+        id: `h-${Date.now()}`,
+        name: "prod-api",
+        address: "prod.example.com",
+        port: 22,
+        favorite: false,
+        tags: {},
+        groups: [],
+        notes: null,
+        logins: [login(`l-${Date.now()}`, "deploy", agent, { kind: "direct" })],
+      });
+      hosts = [imported];
+      changed();
+      return wait(
+        ok({
+          hosts: [imported],
+          skippedHosts: preview.skippedHosts,
+          unsupported: preview.unsupported,
+        }),
+      );
+    },
     onChange: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

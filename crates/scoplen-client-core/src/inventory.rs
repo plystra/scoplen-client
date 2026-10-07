@@ -6,7 +6,9 @@
 //! frontend. It returns only display data, never credential secrets, and uses
 //! store transactions for operations that create or remove related objects.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,11 +19,17 @@ use uuid::Uuid;
 use crate::repository::{
     AccessProfile, Credential, CredentialBinding, CredentialKind, Edit, Host, HostChange,
     HostGroup, HostGroupChange, RecordError, Repository, Route, RouteChoice, RouteKind,
+    credential_secret,
 };
 use crate::store::device::{SESSION_HISTORY_LIMIT, SessionKind, SessionOutcome};
 use crate::store::{NewObject, Store, StoreError};
 
 const UNDO_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const MAX_OPEN_SSH_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_OPEN_SSH_HOSTS: usize = 256;
+const MAX_OPEN_SSH_LINE_BYTES: usize = 4096;
+const MAX_PRIVATE_KEY_BYTES: u64 = 1024 * 1024;
+const MAX_PRIVATE_KEY_REUSE_SCAN: usize = 4096;
 
 /// Which parts of the inventory have content to show.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
@@ -383,6 +391,12 @@ pub enum AddHostError {
     /// The selected key file does not exist or could not be read.
     #[error("the selected key file was not found")]
     KeyNotFound,
+    /// The selected key file exceeds the bounded local import size.
+    #[error("the selected key file is too large")]
+    KeyTooLarge,
+    /// Reusing a private key would require scanning beyond the bounded local limit.
+    #[error("the private-key reuse search reached its local limit")]
+    KeyReuseLimit,
     /// The input is not a private key.
     #[error("the input is not a private key")]
     NotAPrivateKey,
@@ -393,6 +407,130 @@ pub enum AddHostError {
     #[error("PuTTY keys must be converted to OpenSSH format first")]
     PuttyKey,
     /// A disk or model operation failed.
+    #[error("{reference}")]
+    Failed {
+        /// A diagnostic reference safe to show for retryable failures.
+        reference: String,
+    },
+}
+
+/// A representable entry found in an OpenSSH configuration file. This is a
+/// preview DTO: it never contains private key material.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSshImportEntry {
+    /// The `Host` alias that becomes the display name.
+    pub alias: String,
+    /// The resolved host name or address.
+    pub address: String,
+    /// SSH port, defaulting to 22.
+    pub port: u16,
+    /// The configured user, or the current local user when omitted.
+    pub username: String,
+    /// An identity file to read at commit time, if configured.
+    pub identity_file: Option<String>,
+}
+
+/// A directive the limited tier-0 importer cannot represent yet.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSshUnsupportedDirective {
+    /// One-based source line.
+    pub line: u32,
+    /// The directive name as written.
+    pub directive: String,
+}
+
+/// Why a literal `Host` alias cannot be imported without changing its meaning.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OpenSshSkipReason {
+    /// A directive within this host block has no tier-0 representation.
+    UnsupportedDirective {
+        /// The directive name as written.
+        directive: String,
+    },
+    /// A global rule could change any host in the source file.
+    GlobalRules {
+        /// The global directive responsible for the exclusion.
+        directive: String,
+    },
+    /// Multiple `Host` blocks name the same alias.
+    DuplicateAlias,
+    /// A supported directive has a value outside the simple import subset.
+    InvalidValue {
+        /// The directive name as written.
+        directive: String,
+    },
+}
+
+/// A literal alias excluded from the tier-0 import preview.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSshSkippedHost {
+    /// The `Host` alias.
+    pub alias: String,
+    /// One-based line of its `Host` block.
+    pub line: u32,
+    /// Why importing it would be misleading.
+    pub reason: OpenSshSkipReason,
+}
+
+/// A preview of importing one OpenSSH configuration file.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSshImportPreview {
+    /// The selected source path.
+    pub path: String,
+    /// Entries that can be represented by the tier-0 importer.
+    pub entries: Vec<OpenSshImportEntry>,
+    /// Literal aliases excluded from import, with a visible reason.
+    pub skipped_hosts: Vec<OpenSshSkippedHost>,
+    /// Directives that will be skipped and shown to the user.
+    pub unsupported: Vec<OpenSshUnsupportedDirective>,
+}
+
+/// The result of importing a preview into an empty inventory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSshImportResult {
+    /// Hosts created from the preview.
+    pub hosts: Vec<HostDetails>,
+    /// Literal aliases excluded from import, with a visible reason.
+    pub skipped_hosts: Vec<OpenSshSkippedHost>,
+    /// Unsupported directives retained for the report.
+    pub unsupported: Vec<OpenSshUnsupportedDirective>,
+}
+
+/// Why the empty-list OpenSSH import could not proceed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OpenSshImportError {
+    /// The selected file could not be read.
+    #[error("the OpenSSH configuration could not be read")]
+    FileNotFound,
+    /// The source was not valid UTF-8.
+    #[error("the OpenSSH configuration is not UTF-8 text")]
+    NotText,
+    /// The config or its simple-host list exceeds the bounded onboarding import.
+    #[error("the OpenSSH configuration exceeds the onboarding import limit")]
+    TooLarge,
+    /// No representable host block was found.
+    #[error("the OpenSSH configuration has no representable hosts")]
+    NoHosts,
+    /// The source changed after the user reviewed its preview.
+    #[error("the OpenSSH configuration changed after preview")]
+    SourceChanged,
+    /// Import is intentionally limited to the first-launch empty inventory.
+    #[error("OpenSSH import is available only when there are no hosts")]
+    InventoryNotEmpty,
+    /// An identity file named by a representable entry could not be read.
+    #[error("the configured identity file could not be read")]
+    IdentityNotFound {
+        /// The path, which is not secret.
+        path: String,
+    },
+    /// The selected file or local store failed without a partial import.
     #[error("{reference}")]
     Failed {
         /// A diagnostic reference safe to show for retryable failures.
@@ -455,14 +593,34 @@ impl Inventory {
         let hosts = self.host_records()?;
         let groups = Repository::<HostGroup>::new(&self.store).list().map_err(failure)?;
         let credentials = Repository::<Credential>::new(&self.store).list().map_err(failure)?;
-        let routes = Repository::<Route>::new(&self.store).list().map_err(failure)?;
         let profiles = Repository::<AccessProfile>::new(&self.store).list().map_err(failure)?;
+        let routes = Repository::<Route>::new(&self.store).list().map_err(failure)?;
         let recent = !self.recent_sessions()?.is_empty();
+        let credential_uses = profiles.iter().filter_map(|profile| profile.credential).fold(
+            HashMap::<Uuid, u32>::new(),
+            |mut uses, credential| {
+                *uses.entry(credential).or_default() += 1;
+                uses
+            },
+        );
+        let mut explicit_key = false;
+        for credential in &credentials {
+            if credential.kind != CredentialKind::PrivateKey {
+                continue;
+            }
+            let implicit = self.store.is_implicit(credential.meta.id).map_err(failure)?;
+            if !implicit
+                || credential_uses.get(&credential.meta.id).copied().unwrap_or_default() > 1
+            {
+                explicit_key = true;
+                break;
+            }
+        }
         Ok(Areas {
             favorites: hosts.iter().any(|host| host.favorite),
             recent,
             groups: !groups.is_empty(),
-            keys: !credentials.is_empty(),
+            keys: explicit_key,
             routes: !routes.is_empty()
                 || profiles.iter().any(|p| matches!(p.route, RouteChoice::Route(_))),
         })
@@ -565,6 +723,27 @@ impl Inventory {
 
     /// Gets one host and all of its logins.
     pub fn host(&self, host_id: String) -> Result<Option<HostDetails>, Failure> {
+        let host_uuid = parse_id(&host_id).map_err(|_| failed("the host identifier is invalid"))?;
+        let details = self.host_without_promotion(host_id)?;
+        let Some(details) = details else { return Ok(None) };
+        let profiles = self.profiles()?;
+        let credentials = self.credentials()?;
+        let mut inspected = Vec::new();
+        for profile in profiles.iter().filter(|profile| profile.host == host_uuid) {
+            inspected.push((scoplen_model::ObjectType::ACCESS_PROFILE, profile.meta.id));
+            if let Some(credential) = profile.credential
+                && credentials.iter().any(|item| {
+                    item.meta.id == credential && item.kind == CredentialKind::PrivateKey
+                })
+            {
+                inspected.push((scoplen_model::ObjectType::CREDENTIAL, credential));
+            }
+        }
+        self.store.promote_batch(inspected).map_err(failure)?;
+        Ok(Some(details))
+    }
+
+    fn host_without_promotion(&self, host_id: String) -> Result<Option<HostDetails>, Failure> {
         let host_uuid = parse_id(&host_id).map_err(|_| failed("the host identifier is invalid"))?;
         let Some(host) = Repository::<Host>::new(&self.store).get(host_uuid).map_err(failure)?
         else {
@@ -772,52 +951,299 @@ impl Inventory {
             input.name.filter(|name| !name.trim().is_empty()).unwrap_or_else(|| address.clone());
         let (kind, binding, secret) = credential_input(input.sign_in)?;
         let host_id = new_id().map_err(add_failed)?;
-        let credential_id = new_id().map_err(add_failed)?;
         let profile_id = new_id().map_err(add_failed)?;
+        let reusable = self.reusable_key(kind, binding, secret.as_deref())?;
+        let reused = reusable.is_some();
+        let credential_id = match reusable {
+            Some(credential) => credential.meta.id,
+            None => new_id().map_err(add_failed)?,
+        };
         let host_fields = vec![
             (scoplen_model::FieldPath::Field(1), text(name)),
             (scoplen_model::FieldPath::Field(2), text(address)),
             (scoplen_model::FieldPath::Field(3), scoplen_model::cbor::Value::UInt(port as u64)),
             (scoplen_model::FieldPath::Field(8), uuid_value(profile_id)),
         ];
-        let mut credential_fields = vec![
-            (scoplen_model::FieldPath::Field(2), uint(kind as u64)),
-            (scoplen_model::FieldPath::Field(3), uint(binding as u64)),
-        ];
-        if let Some(secret) = secret {
-            credential_fields.push((
-                scoplen_model::FieldPath::Field(4),
-                scoplen_model::cbor::Value::Bytes(secret),
-            ));
-        }
         let profile_fields = vec![
             (scoplen_model::FieldPath::Field(1), uuid_value(host_id)),
             (scoplen_model::FieldPath::Field(3), text(username)),
             (scoplen_model::FieldPath::Field(4), uuid_value(credential_id)),
             (scoplen_model::FieldPath::Field(5), uint(0)),
         ];
+        let mut creates = vec![NewObject {
+            id: host_id,
+            object_type: scoplen_model::ObjectType::HOST,
+            fields: host_fields,
+        }];
+        if !reused {
+            let mut credential_fields = vec![
+                (scoplen_model::FieldPath::Field(2), uint(kind as u64)),
+                (scoplen_model::FieldPath::Field(3), uint(binding as u64)),
+            ];
+            if let Some(secret) = secret {
+                credential_fields.push((
+                    scoplen_model::FieldPath::Field(4),
+                    scoplen_model::cbor::Value::Bytes(secret),
+                ));
+            }
+            creates.push(NewObject {
+                id: credential_id,
+                object_type: scoplen_model::ObjectType::CREDENTIAL,
+                fields: credential_fields,
+            });
+        }
+        creates.push(NewObject {
+            id: profile_id,
+            object_type: scoplen_model::ObjectType::ACCESS_PROFILE,
+            fields: profile_fields,
+        });
+        let mut implicit = vec![(scoplen_model::ObjectType::ACCESS_PROFILE, profile_id)];
+        if !reused {
+            implicit.push((scoplen_model::ObjectType::CREDENTIAL, credential_id));
+        }
+        let promotions = if reused {
+            vec![(scoplen_model::ObjectType::CREDENTIAL, credential_id)]
+        } else {
+            Vec::new()
+        };
         self.store
-            .create_batch(vec![
-                NewObject {
-                    id: host_id,
-                    object_type: scoplen_model::ObjectType::HOST,
-                    fields: host_fields,
-                },
-                NewObject {
-                    id: credential_id,
-                    object_type: scoplen_model::ObjectType::CREDENTIAL,
-                    fields: credential_fields,
-                },
-                NewObject {
-                    id: profile_id,
-                    object_type: scoplen_model::ObjectType::ACCESS_PROFILE,
-                    fields: profile_fields,
-                },
-            ])
+            .create_batch_with_implicit_and_promotions(creates, implicit, promotions)
             .map_err(add_failed)?;
-        self.host(id(host_id))
+        self.host_without_promotion(id(host_id))
             .map_err(|error| AddHostError::Failed { reference: error.to_string() })?
             .ok_or_else(|| add_failed("the host disappeared after creation"))
+    }
+
+    fn reusable_key(
+        &self,
+        kind: CredentialKind,
+        binding: CredentialBinding,
+        secret: Option<&[u8]>,
+    ) -> Result<Option<Credential>, AddHostError> {
+        if kind != CredentialKind::PrivateKey || binding != CredentialBinding::Shared {
+            return Ok(None);
+        }
+        let Some(secret) = secret else { return Ok(None) };
+        let credentials = Repository::<Credential>::new(&self.store)
+            .list()
+            .map_err(|error| AddHostError::Failed { reference: diagnostic(&error) })?;
+        let mut scanned = 0;
+        for credential in credentials {
+            if credential.kind != kind || credential.binding != binding || !credential.has_secret {
+                continue;
+            }
+            scanned += 1;
+            if scanned > MAX_PRIVATE_KEY_REUSE_SCAN {
+                return Err(AddHostError::KeyReuseLimit);
+            }
+            if credential_secret(&self.store, credential.meta.id)
+                .map_err(|error| AddHostError::Failed { reference: diagnostic(&error) })?
+                .is_some_and(|stored| stored.as_bytes() == secret)
+            {
+                return Ok(Some(credential));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reads a simple OpenSSH configuration for the empty-inventory onboarding
+    /// flow. The source is never modified and the result contains no secret
+    /// material. Full `Include`, `Match`, wildcard, proxy, and forwarding
+    /// semantics remain owned by the later OpenSSH interoperability gate.
+    pub fn preview_open_ssh_config(
+        &self,
+        path: String,
+    ) -> Result<OpenSshImportPreview, OpenSshImportError> {
+        let parsed = parse_open_ssh_config(Path::new(&path))?;
+        if parsed.entries.is_empty()
+            && parsed.skipped_hosts.is_empty()
+            && parsed.unsupported.is_empty()
+        {
+            return Err(OpenSshImportError::NoHosts);
+        }
+        Ok(OpenSshImportPreview {
+            path,
+            entries: parsed.entries,
+            skipped_hosts: parsed.skipped_hosts,
+            unsupported: parsed.unsupported,
+        })
+    }
+
+    /// Imports representable `Host` blocks only when the inventory is empty.
+    /// All entries are validated before the first write; a malformed source or
+    /// missing identity therefore leaves the store unchanged.
+    pub fn import_open_ssh_config(
+        &self,
+        preview: OpenSshImportPreview,
+    ) -> Result<OpenSshImportResult, OpenSshImportError> {
+        if !self.host_records().map_err(import_failure)?.is_empty() {
+            return Err(OpenSshImportError::InventoryNotEmpty);
+        }
+        let parsed = parse_open_ssh_config(Path::new(&preview.path))?;
+        if parsed.entries != preview.entries
+            || parsed.skipped_hosts != preview.skipped_hosts
+            || parsed.unsupported != preview.unsupported
+        {
+            return Err(OpenSshImportError::SourceChanged);
+        }
+        if parsed.entries.is_empty() {
+            return Err(OpenSshImportError::NoHosts);
+        }
+        let mut inputs = Vec::with_capacity(parsed.entries.len());
+        for entry in &parsed.entries {
+            let sign_in = match &entry.identity_file {
+                Some(identity_file) => {
+                    let path = expand_config_path(identity_file);
+                    if !path.is_file() {
+                        return Err(OpenSshImportError::IdentityNotFound {
+                            path: path.to_string_lossy().into_owned(),
+                        });
+                    }
+                    SignIn::KeyFile { path: path.to_string_lossy().into_owned() }
+                }
+                None => SignIn::Agent,
+            };
+            inputs.push(NewHost {
+                name: Some(entry.alias.clone()),
+                address: entry.address.clone(),
+                port: Some(entry.port),
+                username: entry.username.clone(),
+                sign_in,
+            });
+        }
+
+        let (creates, implicit, host_ids, promote_credentials) =
+            self.prepare_import_batch(&inputs).map_err(import_add_failure)?;
+        self.store
+            .create_initial_inventory_batch(
+                creates,
+                implicit,
+                promote_credentials
+                    .into_iter()
+                    .map(|id| (scoplen_model::ObjectType::CREDENTIAL, id))
+                    .collect(),
+            )
+            .map_err(|error| match error {
+                StoreError::InventoryNotEmpty => OpenSshImportError::InventoryNotEmpty,
+                other => import_failure(other),
+            })?;
+        let mut hosts = Vec::with_capacity(host_ids.len());
+        for host_id in host_ids {
+            hosts.push(
+                self.host_without_promotion(id(host_id))
+                    .map_err(|error| OpenSshImportError::Failed { reference: error.to_string() })?
+                    .ok_or_else(|| OpenSshImportError::Failed {
+                        reference: "the imported host disappeared after creation".into(),
+                    })?,
+            );
+        }
+        Ok(OpenSshImportResult {
+            hosts,
+            skipped_hosts: parsed.skipped_hosts,
+            unsupported: parsed.unsupported,
+        })
+    }
+
+    fn prepare_import_batch(
+        &self,
+        inputs: &[NewHost],
+    ) -> Result<PreparedImportBatch, AddHostError> {
+        let mut creates = Vec::with_capacity(inputs.len() * 3);
+        let mut implicit = Vec::with_capacity(inputs.len() * 2);
+        let mut host_ids = Vec::with_capacity(inputs.len());
+        let mut promote_credentials = Vec::new();
+        let mut new_keys = HashMap::<Vec<u8>, Uuid>::new();
+        let mut key_uses = HashMap::<Uuid, u32>::new();
+        for input in inputs {
+            let address = input.address.trim().to_owned();
+            if address.is_empty() || address.chars().any(char::is_whitespace) {
+                return Err(AddHostError::InvalidAddress);
+            }
+            let port = input.port.unwrap_or(22);
+            if port == 0 {
+                return Err(AddHostError::InvalidPort);
+            }
+            let username = input.username.trim().to_owned();
+            if username.is_empty() {
+                return Err(AddHostError::EmptyUsername);
+            }
+            let name = input
+                .name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| address.clone());
+            let (kind, binding, secret) = credential_input(input.sign_in.clone())?;
+            let reusable =
+                if kind == CredentialKind::PrivateKey && binding == CredentialBinding::Shared {
+                    if let Some(secret) = secret.as_deref() {
+                        if let Some(id) = new_keys.get(secret) {
+                            Some(*id)
+                        } else {
+                            self.reusable_key(kind, binding, Some(secret))?
+                                .map(|credential| credential.meta.id)
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            let host_id = new_id().map_err(add_failed)?;
+            let profile_id = new_id().map_err(add_failed)?;
+            let credential_id = reusable.unwrap_or(new_id().map_err(add_failed)?);
+            host_ids.push(host_id);
+            creates.push(NewObject {
+                id: host_id,
+                object_type: scoplen_model::ObjectType::HOST,
+                fields: vec![
+                    (scoplen_model::FieldPath::Field(1), text(name)),
+                    (scoplen_model::FieldPath::Field(2), text(address)),
+                    (scoplen_model::FieldPath::Field(3), uint(port as u64)),
+                    (scoplen_model::FieldPath::Field(8), uuid_value(profile_id)),
+                ],
+            });
+            if reusable.is_none() {
+                let mut fields = vec![
+                    (scoplen_model::FieldPath::Field(2), uint(kind as u64)),
+                    (scoplen_model::FieldPath::Field(3), uint(binding as u64)),
+                ];
+                if let Some(secret) = secret {
+                    if kind == CredentialKind::PrivateKey {
+                        new_keys.insert(secret.clone(), credential_id);
+                    }
+                    fields.push((
+                        scoplen_model::FieldPath::Field(4),
+                        scoplen_model::cbor::Value::Bytes(secret),
+                    ));
+                }
+                creates.push(NewObject {
+                    id: credential_id,
+                    object_type: scoplen_model::ObjectType::CREDENTIAL,
+                    fields,
+                });
+                implicit.push((scoplen_model::ObjectType::CREDENTIAL, credential_id));
+            } else {
+                promote_credentials.push(credential_id);
+            }
+            *key_uses.entry(credential_id).or_default() += 1;
+            creates.push(NewObject {
+                id: profile_id,
+                object_type: scoplen_model::ObjectType::ACCESS_PROFILE,
+                fields: vec![
+                    (scoplen_model::FieldPath::Field(1), uuid_value(host_id)),
+                    (scoplen_model::FieldPath::Field(3), text(username)),
+                    (scoplen_model::FieldPath::Field(4), uuid_value(credential_id)),
+                    (scoplen_model::FieldPath::Field(5), uint(0)),
+                ],
+            });
+            implicit.push((scoplen_model::ObjectType::ACCESS_PROFILE, profile_id));
+        }
+        for (credential_id, uses) in key_uses {
+            if uses > 1 && !promote_credentials.contains(&credential_id) {
+                promote_credentials.push(credential_id);
+            }
+        }
+        Ok((creates, implicit, host_ids, promote_credentials))
     }
 
     /// Sets or clears the favorite marker.
@@ -996,11 +1422,14 @@ fn credential_input(
             Ok((CredentialKind::Password, CredentialBinding::Shared, Some(password.into_bytes())))
         }
         SignIn::KeyFile { path } => {
-            let bytes = std::fs::read(path).map_err(|_| AddHostError::KeyNotFound)?;
+            let bytes = read_private_key_file(&path)?;
             validate_private_key(&bytes)?;
             Ok((CredentialKind::PrivateKey, CredentialBinding::Shared, Some(bytes)))
         }
         SignIn::KeyText { key } => {
+            if key.len() as u64 > MAX_PRIVATE_KEY_BYTES {
+                return Err(AddHostError::KeyTooLarge);
+            }
             let bytes = key.into_bytes();
             validate_private_key(&bytes)?;
             Ok((CredentialKind::PrivateKey, CredentialBinding::Shared, Some(bytes)))
@@ -1010,6 +1439,231 @@ fn credential_input(
         }),
         SignIn::Agent => Ok((CredentialKind::Agent, CredentialBinding::None, None)),
     }
+}
+
+fn read_private_key_file(path: &str) -> Result<Vec<u8>, AddHostError> {
+    let file = std::fs::File::open(path).map_err(|_| AddHostError::KeyNotFound)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PRIVATE_KEY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AddHostError::KeyNotFound)?;
+    if bytes.len() as u64 > MAX_PRIVATE_KEY_BYTES {
+        return Err(AddHostError::KeyTooLarge);
+    }
+    Ok(bytes)
+}
+
+struct ParsedOpenSshConfig {
+    entries: Vec<OpenSshImportEntry>,
+    skipped_hosts: Vec<OpenSshSkippedHost>,
+    unsupported: Vec<OpenSshUnsupportedDirective>,
+}
+
+type PreparedImportBatch =
+    (Vec<NewObject>, Vec<(scoplen_model::ObjectType, Uuid)>, Vec<Uuid>, Vec<Uuid>);
+
+struct OpenSshCandidate {
+    line: u32,
+    entry: OpenSshImportEntry,
+    reason: Option<OpenSshSkipReason>,
+}
+
+fn parse_open_ssh_config(path: &Path) -> Result<ParsedOpenSshConfig, OpenSshImportError> {
+    let file = std::fs::File::open(path).map_err(|_| OpenSshImportError::FileNotFound)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_OPEN_SSH_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| OpenSshImportError::FileNotFound)?;
+    if bytes.len() as u64 > MAX_OPEN_SSH_CONFIG_BYTES {
+        return Err(OpenSshImportError::TooLarge);
+    }
+    let text = String::from_utf8(bytes).map_err(|_| OpenSshImportError::NotText)?;
+    let default_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+    let mut current = Vec::new();
+    let mut current_reason = None;
+    let mut candidates = Vec::new();
+    let mut global_reason = None;
+    let mut seen_directives = HashSet::new();
+    let mut unsupported = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        if raw.len() > MAX_OPEN_SSH_LINE_BYTES {
+            return Err(OpenSshImportError::TooLarge);
+        }
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let Some(directive) = words.next() else { continue };
+        let value = words.collect::<Vec<_>>().join(" ");
+        let directive_lower = directive.to_ascii_lowercase();
+        match directive_lower.as_str() {
+            "host" => {
+                flush_open_ssh_block(&mut current, &mut current_reason, &mut candidates);
+                seen_directives.clear();
+                let aliases = value.split_whitespace().collect::<Vec<_>>();
+                if aliases.is_empty() || aliases.iter().any(|alias| !simple_ssh_value(alias)) {
+                    global_reason.get_or_insert_with(|| "Host".to_owned());
+                    unsupported.push(OpenSshUnsupportedDirective {
+                        line: (index + 1) as u32,
+                        directive: directive.to_owned(),
+                    });
+                }
+                for alias in aliases {
+                    if alias.chars().any(|character| matches!(character, '*' | '?' | '!')) {
+                        global_reason.get_or_insert_with(|| "Host".to_owned());
+                        unsupported.push(OpenSshUnsupportedDirective {
+                            line: (index + 1) as u32,
+                            directive: directive.to_owned(),
+                        });
+                        continue;
+                    }
+                    if !simple_ssh_value(alias) {
+                        continue;
+                    }
+                    current.push(OpenSshCandidate {
+                        line: (index + 1) as u32,
+                        entry: OpenSshImportEntry {
+                            alias: alias.to_owned(),
+                            address: alias.to_owned(),
+                            port: 22,
+                            username: default_user.clone(),
+                            identity_file: None,
+                        },
+                        reason: None,
+                    });
+                    if candidates.len() + current.len() > MAX_OPEN_SSH_HOSTS {
+                        return Err(OpenSshImportError::TooLarge);
+                    }
+                }
+            }
+            "include" | "match" => {
+                flush_open_ssh_block(&mut current, &mut current_reason, &mut candidates);
+                global_reason.get_or_insert_with(|| directive.to_owned());
+                unsupported.push(OpenSshUnsupportedDirective {
+                    line: (index + 1) as u32,
+                    directive: directive.to_owned(),
+                });
+            }
+            "hostname" | "user" | "port" | "identityfile" => {
+                if current.is_empty() {
+                    global_reason.get_or_insert_with(|| directive.to_owned());
+                    unsupported.push(OpenSshUnsupportedDirective {
+                        line: (index + 1) as u32,
+                        directive: directive.to_owned(),
+                    });
+                    continue;
+                }
+                let repeated = !seen_directives.insert(directive_lower.clone());
+                let valid = simple_ssh_value(&value)
+                    && match directive_lower.as_str() {
+                        "port" => value.parse::<u16>().is_ok_and(|port| port != 0),
+                        "identityfile" => {
+                            value.starts_with("~/") || Path::new(&value).is_absolute()
+                        }
+                        _ => true,
+                    };
+                if repeated || !valid {
+                    current_reason.get_or_insert(OpenSshSkipReason::InvalidValue {
+                        directive: directive.to_owned(),
+                    });
+                    unsupported.push(OpenSshUnsupportedDirective {
+                        line: (index + 1) as u32,
+                        directive: directive.to_owned(),
+                    });
+                    continue;
+                }
+                for candidate in &mut current {
+                    match directive_lower.as_str() {
+                        "hostname" => candidate.entry.address = value.clone(),
+                        "user" => candidate.entry.username = value.clone(),
+                        "port" => candidate.entry.port = value.parse().unwrap_or(22),
+                        "identityfile" => candidate.entry.identity_file = Some(value.clone()),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ => {
+                if current.is_empty() {
+                    global_reason.get_or_insert_with(|| directive.to_owned());
+                } else {
+                    current_reason.get_or_insert(OpenSshSkipReason::UnsupportedDirective {
+                        directive: directive.to_owned(),
+                    });
+                }
+                unsupported.push(OpenSshUnsupportedDirective {
+                    line: (index + 1) as u32,
+                    directive: directive.to_owned(),
+                });
+            }
+        }
+    }
+    flush_open_ssh_block(&mut current, &mut current_reason, &mut candidates);
+    let mut counts = HashMap::<String, usize>::new();
+    for candidate in &candidates {
+        *counts.entry(candidate.entry.alias.to_ascii_lowercase()).or_default() += 1;
+    }
+    let mut entries = Vec::new();
+    let mut skipped_hosts = Vec::new();
+    for candidate in candidates {
+        let reason = global_reason
+            .as_ref()
+            .map(|directive| OpenSshSkipReason::GlobalRules { directive: directive.clone() })
+            .or_else(|| {
+                (counts.get(&candidate.entry.alias.to_ascii_lowercase()).copied().unwrap_or(0) > 1)
+                    .then_some(OpenSshSkipReason::DuplicateAlias)
+            })
+            .or(candidate.reason);
+        if let Some(reason) = reason {
+            skipped_hosts.push(OpenSshSkippedHost {
+                alias: candidate.entry.alias,
+                line: candidate.line,
+                reason,
+            });
+        } else {
+            entries.push(candidate.entry);
+        }
+    }
+    Ok(ParsedOpenSshConfig { entries, skipped_hosts, unsupported })
+}
+
+fn flush_open_ssh_block(
+    current: &mut Vec<OpenSshCandidate>,
+    reason: &mut Option<OpenSshSkipReason>,
+    candidates: &mut Vec<OpenSshCandidate>,
+) {
+    for mut candidate in current.drain(..) {
+        candidate.reason = reason.clone();
+        candidates.push(candidate);
+    }
+    *reason = None;
+}
+
+fn simple_ssh_value(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(|character| {
+            character.is_whitespace()
+                || matches!(character, '\\' | '\'' | '"' | '#' | '%' | '*' | '?' | '!')
+        })
+}
+
+fn expand_config_path(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
+}
+
+fn import_failure(error: impl std::error::Error) -> OpenSshImportError {
+    OpenSshImportError::Failed { reference: diagnostic(&error) }
+}
+
+fn import_add_failure(error: AddHostError) -> OpenSshImportError {
+    OpenSshImportError::Failed { reference: error.to_string() }
 }
 
 fn validate_private_key(bytes: &[u8]) -> Result<(), AddHostError> {
@@ -1256,8 +1910,12 @@ mod tests {
             })
             .unwrap();
         inventory.set_favorite(details.summary.id.clone(), true).unwrap();
+        // The first-launch login and credential remain implicit until the
+        // user inspects the host or reuses the credential.
+        assert!(!inventory.areas().unwrap().keys);
+        inventory.host(details.summary.id).unwrap();
         let areas = inventory.areas().unwrap();
-        assert!(areas.favorites && areas.keys);
+        assert!(areas.favorites && !areas.keys);
         let hosts = inventory.hosts(HostSource::Favorites, "ROOT".into()).unwrap();
         assert_eq!(hosts.len(), 1);
     }
@@ -1389,5 +2047,271 @@ mod tests {
             .update_group(group.id, GroupInput { name: "Prod".into(), parent: None })
             .unwrap();
         assert_eq!(updated.name, "Prod");
+    }
+
+    #[test]
+    fn implicit_key_and_login_promote_when_host_is_inspected() {
+        let inventory = inventory();
+        let key =
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nplaceholder\n-----END OPENSSH PRIVATE KEY-----";
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::KeyText { key: key.into() },
+            })
+            .unwrap();
+        let credential = parse_id(&details.logins[0].credential.as_ref().unwrap().id).unwrap();
+        let profile = parse_id(&details.logins[0].id).unwrap();
+        assert!(inventory.store.is_implicit(credential).unwrap());
+        assert!(inventory.store.is_implicit(profile).unwrap());
+        assert!(!inventory.areas().unwrap().keys);
+
+        let inspected = inventory.host(details.summary.id).unwrap().unwrap();
+        assert_eq!(inspected.summary.name, "api");
+        assert!(!inventory.store.is_implicit(credential).unwrap());
+        assert!(!inventory.store.is_implicit(profile).unwrap());
+        assert!(inventory.areas().unwrap().keys);
+    }
+
+    #[test]
+    fn inspecting_a_password_host_does_not_promote_a_password_or_show_keys() {
+        let inventory = inventory();
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("password-host".into()),
+                address: "password.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Password { password: "secret".into() },
+            })
+            .unwrap();
+        let credential = parse_id(&details.logins[0].credential.as_ref().unwrap().id).unwrap();
+        assert!(inventory.store.is_implicit(credential).unwrap());
+        assert!(!inventory.areas().unwrap().keys);
+
+        inventory.host(details.summary.id).unwrap().unwrap();
+        assert!(inventory.store.is_implicit(credential).unwrap());
+        assert!(!inventory.areas().unwrap().keys);
+    }
+
+    #[test]
+    fn oversized_key_files_are_rejected_before_reading_into_the_store() {
+        let inventory = inventory();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized-key");
+        let mut bytes = vec![b'x'; MAX_PRIVATE_KEY_BYTES as usize + 1];
+        bytes[..35].copy_from_slice(b"-----BEGIN OPENSSH PRIVATE KEY-----");
+        std::fs::write(&path, bytes).unwrap();
+        let result = inventory.add_host(NewHost {
+            name: Some("too-large".into()),
+            address: "large.example".into(),
+            port: None,
+            username: "ops".into(),
+            sign_in: SignIn::KeyFile { path: path.to_string_lossy().into_owned() },
+        });
+        assert_eq!(result, Err(AddHostError::KeyTooLarge));
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reusing_a_key_on_a_second_host_promotes_the_credential() {
+        let inventory = inventory();
+        let key =
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nplaceholder\n-----END OPENSSH PRIVATE KEY-----";
+        let first = inventory
+            .add_host(NewHost {
+                name: Some("one".into()),
+                address: "one.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::KeyText { key: key.into() },
+            })
+            .unwrap();
+        let first_credential = first.logins[0].credential.as_ref().unwrap().id.clone();
+        let second = inventory
+            .add_host(NewHost {
+                name: Some("two".into()),
+                address: "two.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::KeyText { key: key.into() },
+            })
+            .unwrap();
+        assert_eq!(second.logins[0].credential.as_ref().unwrap().id, first_credential);
+        assert!(inventory.areas().unwrap().keys);
+        assert_eq!(inventory.store.list(scoplen_model::ObjectType::CREDENTIAL).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_ssh_preview_reports_unsupported_directives_without_writing() {
+        let inventory = inventory();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "Host prod\n  HostName prod.example\n  User deploy\n  Port 2222\n  ProxyJump bastion\nHost safe\n  HostName safe.example\n  User deploy\n",
+        )
+        .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        assert_eq!(preview.entries.len(), 1);
+        assert_eq!(preview.entries[0].address, "safe.example");
+        assert_eq!(preview.entries[0].port, 22);
+        assert_eq!(preview.entries[0].username, "deploy");
+        assert_eq!(preview.skipped_hosts.len(), 1);
+        assert_eq!(preview.skipped_hosts[0].alias, "prod");
+        assert_eq!(
+            preview.skipped_hosts[0].reason,
+            OpenSshSkipReason::UnsupportedDirective { directive: "ProxyJump".into() }
+        );
+        assert_eq!(preview.unsupported[0].directive, "ProxyJump");
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().is_empty());
+        let imported = inventory.import_open_ssh_config(preview.clone()).unwrap();
+        assert_eq!(imported.hosts.len(), 1);
+        assert_eq!(imported.hosts[0].summary.name, "safe");
+        assert_eq!(imported.skipped_hosts, preview.skipped_hosts);
+    }
+
+    #[test]
+    fn open_ssh_global_rules_and_duplicate_aliases_fail_closed() {
+        let inventory = inventory();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "Host first\n  HostName first.example\nMatch host first\n  HostName changed.example\nHost second\n  HostName second.example\n",
+        )
+        .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        assert!(preview.entries.is_empty());
+        assert_eq!(preview.skipped_hosts.len(), 2);
+        assert!(preview.skipped_hosts.iter().all(|host| matches!(
+            host.reason,
+            OpenSshSkipReason::GlobalRules { ref directive } if directive == "Match"
+        )));
+        assert_eq!(
+            inventory.import_open_ssh_config(preview.clone()),
+            Err(OpenSshImportError::NoHosts)
+        );
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().is_empty());
+
+        std::fs::write(&config, "Host one\n  HostName one.example\nHost *\n  ProxyJump gateway\n")
+            .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        assert!(preview.entries.is_empty());
+        assert_eq!(preview.skipped_hosts[0].alias, "one");
+        assert!(matches!(
+            preview.skipped_hosts[0].reason,
+            OpenSshSkipReason::GlobalRules { ref directive } if directive == "Host"
+        ));
+
+        std::fs::write(
+            &config,
+            "Host duplicate\n  HostName first.example\nHost duplicate\n  HostName second.example\nHost unique\n  HostName unique.example\n",
+        )
+        .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        assert_eq!(preview.entries.len(), 1);
+        assert_eq!(preview.entries[0].alias, "unique");
+        assert_eq!(preview.skipped_hosts.len(), 2);
+        assert!(
+            preview
+                .skipped_hosts
+                .iter()
+                .all(|host| host.reason == OpenSshSkipReason::DuplicateAlias)
+        );
+    }
+
+    #[test]
+    fn open_ssh_config_and_host_counts_are_bounded() {
+        let inventory = inventory();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "#".repeat(MAX_OPEN_SSH_CONFIG_BYTES as usize + 1)).unwrap();
+        assert_eq!(
+            inventory.preview_open_ssh_config(config.to_string_lossy().into()),
+            Err(OpenSshImportError::TooLarge)
+        );
+        let hosts =
+            (0..=MAX_OPEN_SSH_HOSTS).map(|index| format!("Host h{index}\n")).collect::<String>();
+        std::fs::write(&config, hosts).unwrap();
+        assert_eq!(
+            inventory.preview_open_ssh_config(config.to_string_lossy().into()),
+            Err(OpenSshImportError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn open_ssh_import_rejects_a_source_changed_after_preview() {
+        let inventory = inventory();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "Host one\n  HostName one.example\n").unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        std::fs::write(&config, "Host two\n  HostName two.example\n").unwrap();
+        assert_eq!(
+            inventory.import_open_ssh_config(preview),
+            Err(OpenSshImportError::SourceChanged)
+        );
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_ssh_import_is_empty_inventory_only_and_prevalidates_identity_files() {
+        let inventory = inventory();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let identity = dir.path().join("id_ed25519");
+        std::fs::write(
+            &identity,
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----",
+        )
+        .unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "Host prod\n  HostName prod.example\n  User deploy\n  IdentityFile {}\nHost missing\n  HostName missing.example\n  IdentityFile {}/not-there\n",
+                identity.to_string_lossy().replace('\\', "/"),
+                dir.path().to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        let error = inventory.import_open_ssh_config(preview).unwrap_err();
+        assert!(matches!(error, OpenSshImportError::IdentityNotFound { .. }));
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().is_empty());
+
+        let invalid_identity = dir.path().join("not_private");
+        std::fs::write(&invalid_identity, "ssh-ed25519 public-key").unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "Host prod\n  HostName prod.example\n  IdentityFile {}\nHost bad\n  HostName bad.example\n  IdentityFile {}\n",
+                identity.to_string_lossy().replace('\\', "/"),
+                invalid_identity.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        let error = inventory.import_open_ssh_config(preview).unwrap_err();
+        assert!(matches!(error, OpenSshImportError::Failed { .. }));
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().is_empty());
+
+        std::fs::write(
+            &config,
+            format!(
+                "Host prod\n  HostName prod.example\n  User deploy\n  IdentityFile {}\n",
+                identity.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let preview = inventory.preview_open_ssh_config(config.to_string_lossy().into()).unwrap();
+        let imported = inventory.import_open_ssh_config(preview.clone()).unwrap();
+        assert_eq!(imported.hosts.len(), 1);
+        assert!(inventory.hosts(HostSource::All, String::new()).unwrap().len() == 1);
+        let error = inventory.import_open_ssh_config(preview).unwrap_err();
+        assert_eq!(error, OpenSshImportError::InventoryNotEmpty);
     }
 }

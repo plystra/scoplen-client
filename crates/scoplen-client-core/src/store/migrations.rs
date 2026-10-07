@@ -74,4 +74,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         updated_at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
     "#,
+    // 3: local concept exposure metadata. Implicit objects are created by
+    // tier-0 flows and promoted when they are reused or inspected. This
+    // table is device-local: the object itself remains a normal replicated
+    // object and carries no UI-only state.
+    r#"
+    CREATE TABLE implicit_objects (
+        object_id   BLOB    PRIMARY KEY CHECK (length(object_id) = 16),
+        object_type INTEGER NOT NULL,
+        created_at  INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX implicit_objects_by_type ON implicit_objects (object_type);
+    "#,
 ];

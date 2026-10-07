@@ -55,6 +55,9 @@ pub enum StoreError {
     /// A create operation supplied an identifier already in the store.
     #[error("object {0} already exists")]
     AlreadyExists(Uuid),
+    /// An onboarding import raced with another host creation.
+    #[error("the inventory already contains hosts")]
+    InventoryNotEmpty,
     /// A stored object could not be decoded.
     #[error("stored object {id} is unreadable")]
     Corrupt {
@@ -258,24 +261,199 @@ impl Store {
 
     /// Creates several related objects in one transaction.
     pub fn create_batch(&self, creates: Vec<NewObject>) -> Result<Vec<Object>, StoreError> {
+        self.create_batch_with_implicit(creates, Vec::new())
+    }
+
+    /// Creates several related objects and records the subset that starts as
+    /// implicit in one transaction. The metadata is local to this device;
+    /// object envelopes remain unchanged and therefore continue to sync.
+    pub fn create_batch_with_implicit(
+        &self,
+        creates: Vec<NewObject>,
+        implicit: Vec<(ObjectType, Uuid)>,
+    ) -> Result<Vec<Object>, StoreError> {
+        self.create_batch_with_implicit_and_promotions(creates, implicit, Vec::new())
+    }
+
+    /// Creates related objects, marks newly implicit objects, and promotes
+    /// reused objects in one transaction.
+    pub fn create_batch_with_implicit_and_promotions(
+        &self,
+        creates: Vec<NewObject>,
+        implicit: Vec<(ObjectType, Uuid)>,
+        promotions: Vec<(ObjectType, Uuid)>,
+    ) -> Result<Vec<Object>, StoreError> {
+        self.create_batch_with_implicit_and_promotions_inner(creates, implicit, promotions, false)
+    }
+
+    /// Creates an initial inventory only if no live Host exists at commit
+    /// time. The empty-inventory check shares the creation transaction.
+    pub fn create_initial_inventory_batch(
+        &self,
+        creates: Vec<NewObject>,
+        implicit: Vec<(ObjectType, Uuid)>,
+        promotions: Vec<(ObjectType, Uuid)>,
+    ) -> Result<Vec<Object>, StoreError> {
+        self.create_batch_with_implicit_and_promotions_inner(creates, implicit, promotions, true)
+    }
+
+    fn create_batch_with_implicit_and_promotions_inner(
+        &self,
+        creates: Vec<NewObject>,
+        implicit: Vec<(ObjectType, Uuid)>,
+        promotions: Vec<(ObjectType, Uuid)>,
+        require_empty_hosts: bool,
+    ) -> Result<Vec<Object>, StoreError> {
         if creates.is_empty() {
             return Ok(Vec::new());
         }
         let (objects, changes) = {
             let mut conn = self.conn();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if require_empty_hosts {
+                let host_count: i64 = tx.query_row(
+                    "SELECT count(*) FROM objects WHERE type = ?1 AND deleted = 0",
+                    params![ObjectType::HOST.to_wire() as i64],
+                    |row| row.get(0),
+                )?;
+                if host_count != 0 {
+                    return Err(StoreError::InventoryNotEmpty);
+                }
+            }
             let mut objects = Vec::with_capacity(creates.len());
             for create in creates {
                 objects.push(apply_create(&tx, self.device_id, create)?);
             }
+            let now = scoplen_model::system_time_millis()?;
+            for (_, id) in &implicit {
+                if !objects.iter().any(|object| object.id == *id) {
+                    return Err(StoreError::NotFound(*id));
+                }
+            }
+            for (object_type, id) in implicit {
+                let object = objects
+                    .iter()
+                    .find(|object| object.id == id)
+                    .ok_or(StoreError::NotFound(id))?;
+                if object.object_type != object_type {
+                    return Err(StoreError::Merge(MergeError::TypeMismatch {
+                        local: object.object_type,
+                        remote: object_type,
+                    }));
+                }
+                tx.execute(
+                    "INSERT INTO implicit_objects (object_id, object_type, created_at) VALUES (?1, ?2, ?3)",
+                    params![id.as_bytes().as_slice(), object_type.to_wire() as i64, now as i64],
+                )?;
+            }
+            let mut promoted = Vec::new();
+            for (object_type, id) in promotions {
+                let object = match objects.iter().find(|object| object.id == id) {
+                    Some(object) => Some(object.clone()),
+                    None => read_object(&tx, id)?,
+                }
+                .ok_or(StoreError::NotFound(id))?;
+                if object.object_type != object_type {
+                    return Err(StoreError::Merge(MergeError::TypeMismatch {
+                        local: object.object_type,
+                        remote: object_type,
+                    }));
+                }
+                if tx.execute(
+                    "DELETE FROM implicit_objects WHERE object_id = ?1 AND object_type = ?2",
+                    params![id.as_bytes().as_slice(), object_type.to_wire() as i64],
+                )? > 0
+                {
+                    promoted.push((object_type, id));
+                }
+            }
             tx.commit()?;
-            let changes = grouped_changes(&objects);
+            let changes = grouped_changes_from_pairs(
+                objects.iter().map(|object| (object.object_type, object.id)).chain(promoted),
+            );
             (objects, changes)
         };
         for change in changes {
             self.notify(&change);
         }
         Ok(objects)
+    }
+
+    /// Returns whether a live or tombstoned object is still implicit on this
+    /// device. Unknown objects are explicit, which keeps objects created by
+    /// older versions visible after the metadata migration.
+    pub fn is_implicit(&self, id: Uuid) -> Result<bool, StoreError> {
+        let conn = self.conn();
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM implicit_objects WHERE object_id = ?1",
+                params![id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
+    /// Promotes an implicit object to an explicit object. Promotion is
+    /// idempotent and emits a local change so the interface refreshes areas.
+    pub fn promote(&self, object_type: ObjectType, id: Uuid) -> Result<(), StoreError> {
+        let changed = {
+            let conn = self.conn();
+            let changed = conn.execute(
+                "DELETE FROM implicit_objects WHERE object_id = ?1 AND object_type = ?2",
+                params![id.as_bytes().as_slice(), object_type.to_wire() as i64],
+            )?;
+            changed > 0
+        };
+        if changed {
+            self.notify(&Change { object_type, ids: vec![id] });
+        }
+        Ok(())
+    }
+
+    /// Promotes several objects after one inspection. A single notification
+    /// per type avoids redundant frontend reloads while retaining the normal
+    /// `storeChanged` contract.
+    pub fn promote_batch<I>(&self, objects: I) -> Result<(), StoreError>
+    where
+        I: IntoIterator<Item = (ObjectType, Uuid)>,
+    {
+        let objects = objects.into_iter().collect::<Vec<_>>();
+        if objects.is_empty() {
+            return Ok(());
+        }
+        let changed = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut changed = Vec::new();
+            for (object_type, id) in objects {
+                if tx.execute(
+                    "DELETE FROM implicit_objects WHERE object_id = ?1 AND object_type = ?2",
+                    params![id.as_bytes().as_slice(), object_type.to_wire() as i64],
+                )? > 0
+                {
+                    changed.push((object_type, id));
+                }
+            }
+            tx.commit()?;
+            grouped_changes_from_pairs(changed)
+        };
+        for change in changed {
+            self.notify(&change);
+        }
+        Ok(())
+    }
+
+    /// Returns the number of implicit objects of a type. This is used by
+    /// inventory visibility rules without exposing local metadata to the UI.
+    pub fn implicit_count(&self, object_type: ObjectType) -> Result<u64, StoreError> {
+        let conn = self.conn();
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM implicit_objects WHERE object_type = ?1",
+            params![object_type.to_wire() as i64],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
     }
 
     /// Deletes an object by giving it a tombstone. It can be restored from

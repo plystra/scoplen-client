@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-import { Button, Confirm, IconButton, Notice, ScopeMark, SearchField, Tag } from "@scoplen/ui";
+import { Button, Confirm, Dialog, IconButton, Notice, ScopeMark, SearchField, Tag } from "@scoplen/ui";
 import { Plus, Star } from "lucide-react";
 import { useRef, useState, type KeyboardEvent } from "react";
 import { useI18n } from "../i18n";
 import { AddHostDialog } from "./add-host";
-import { useInventory, type GroupSummary, type HostSource, type HostSummary, type Id, type RecentSession } from "./api";
+import {
+  useInventory,
+  type GroupSummary,
+  type HostSource,
+  type HostSummary,
+  type Id,
+  type OpenSshImportError,
+  type OpenSshImportPreview,
+  type OpenSshSkipReason,
+  type RecentSession,
+} from "./api";
 import { HostDetailsPanel } from "./host-details";
 import { routeText } from "./labels";
 import { useLoad, type Loaded } from "./use-load";
@@ -22,6 +32,10 @@ export function HostsHome() {
   const [deleting, setDeleting] = useState<HostSummary | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
+  const [importPreview, setImportPreview] = useState<OpenSshImportPreview | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importStale, setImportStale] = useState(false);
   const search = useRef<HTMLInputElement>(null);
 
   const sourceKey = source.kind === "group" ? `group:${source.id}` : source.kind;
@@ -62,6 +76,63 @@ export function HostsHome() {
       event.preventDefault();
       search.current?.focus();
     }
+  };
+
+  const chooseOpenSshConfig = async () => {
+    if (importBusy) return;
+    setImportBusy(true);
+    try {
+      const path = await api.chooseOpenSshConfig();
+      if (!path) return;
+      const preview = await api.previewOpenSshConfig(path);
+      if (preview.status === "ok") {
+        setImportError(null);
+        setImportStale(false);
+        setImportPreview(preview.data);
+      } else {
+        setToast({ message: `${t("import.previewError")} ${openSshImportErrorText(t, preview.error)}` });
+      }
+    } catch {
+      setToast({ message: t("import.error.picker") });
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview || importPreview.entries.length === 0 || importBusy || importStale) return;
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      const result = await api.importOpenSshConfig(importPreview);
+      if (result.status === "ok") {
+        setImportPreview(null);
+        setToast({
+          message:
+            result.data.skippedHosts.length > 0
+              ? t("import.doneWithSkipped", {
+                  count: result.data.hosts.length,
+                  skipped: result.data.skippedHosts.length,
+                })
+              : t("import.done", { count: result.data.hosts.length }),
+        });
+        setSelected(result.data.hosts[0]?.id ?? null);
+      } else {
+        if (result.error.kind === "sourceChanged") setImportStale(true);
+        setImportError(`${t("import.error")} ${openSshImportErrorText(t, result.error)}`);
+      }
+    } catch {
+      setImportError(t("import.error.unexpected"));
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const closeImportPreview = () => {
+    if (importBusy) return;
+    setImportPreview(null);
+    setImportError(null);
+    setImportStale(false);
   };
 
   return (
@@ -134,9 +205,14 @@ export function HostsHome() {
                   <Empty>
                     <h2 className="font-serif text-lg font-medium text-foreground">{t("hosts.empty.title")}</h2>
                     <p className="mt-2 max-w-sm">{t("hosts.empty.body")}</p>
-                    <Button variant="primary" className="mt-5" onClick={() => setAdding(true)}>
-                      {t("hosts.add")}
-                    </Button>
+                    <div className="mt-5 flex flex-wrap justify-center gap-2">
+                      <Button variant="primary" onClick={() => setAdding(true)}>
+                        {t("hosts.add")}
+                      </Button>
+                      <Button variant="ghost" busy={importBusy} onClick={() => void chooseOpenSshConfig()}>
+                        {t("hosts.importOpenSsh")}
+                      </Button>
+                    </div>
                   </Empty>
                 ) : (
                   <Empty>
@@ -185,6 +261,96 @@ export function HostsHome() {
         destructive
       />
 
+      <Dialog
+        open={importPreview !== null}
+        onOpenChange={(open) => !open && closeImportPreview()}
+        title={t("import.title")}
+        closeLabel={t("import.close")}
+        footer={
+          <>
+            <Button variant="ghost" autoFocus disabled={importBusy} onClick={closeImportPreview}>
+              {t("import.cancel")}
+            </Button>
+            <Button
+              variant="primary"
+              busy={importBusy}
+              disabled={!importPreview || importPreview.entries.length === 0 || importStale}
+              onClick={() => void confirmImport()}
+            >
+              {t("import.confirm")}
+            </Button>
+          </>
+        }
+      >
+        {importPreview ? (
+          <div className="space-y-4 text-sm">
+            <p className="m-0 break-all text-muted-foreground">{t("import.file", { path: importPreview.path })}</p>
+            <p className="m-0">{t("import.body", { count: importPreview.entries.length })}</p>
+            {importPreview.entries.length === 0 ? <p className="m-0">{t("import.none")}</p> : null}
+            <section aria-labelledby="import-ready-title">
+              <h3 id="import-ready-title" className="m-0 font-medium">
+                {t("import.ready", { count: importPreview.entries.length })}
+              </h3>
+              {importPreview.entries.length > 0 ? (
+                <ul className="mt-2 mb-0 list-none space-y-2 p-0">
+                  {importPreview.entries.map((entry) => (
+                    <li
+                      key={entry.alias}
+                      className="flex flex-wrap justify-between gap-x-3 border-b border-border pb-2"
+                    >
+                      <span className="break-all font-medium">{entry.alias}</span>
+                      <span className="break-all font-mono text-xs text-muted-foreground">
+                        {entry.username}@{entry.address}
+                        {entry.port === 22 ? "" : `:${entry.port}`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+            {importPreview.skippedHosts.length > 0 ? (
+              <section aria-labelledby="import-skipped-title">
+                <h3 id="import-skipped-title" className="m-0 font-medium">
+                  {t("import.skipped", { count: importPreview.skippedHosts.length })}
+                </h3>
+                <ul className="mt-2 mb-0 list-none space-y-2 p-0">
+                  {importPreview.skippedHosts.map((host, index) => (
+                    <li key={`${host.line}:${host.alias}:${index}`} className="break-words">
+                      <span className="font-medium">{host.alias}</span>
+                      <span className="text-muted-foreground">
+                        {" · "}
+                        {t("import.line", { line: host.line })}
+                        {" · "}
+                        {openSshSkipReasonText(t, host.reason)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+            {importPreview.unsupported.length > 0 ? (
+              <section aria-labelledby="import-unsupported-title">
+                <h3 id="import-unsupported-title" className="m-0 font-medium">
+                  {t("import.unsupported", { count: importPreview.unsupported.length })}
+                </h3>
+                <ul className="mt-2 mb-0 list-none space-y-1 p-0 text-muted-foreground">
+                  {importPreview.unsupported.map((item, index) => (
+                    <li key={`${item.line}:${item.directive}:${index}`} className="break-all">
+                      {t("import.line", { line: item.line })}: {item.directive}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+            {importError ? (
+              <p role="alert" className="m-0 text-attention">
+                {importError}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </Dialog>
+
       {toast ? (
         <Notice
           message={toast.message}
@@ -205,6 +371,40 @@ export function HostsHome() {
       ) : null}
     </div>
   );
+}
+
+function openSshImportErrorText(t: ReturnType<typeof useI18n>["t"], error: OpenSshImportError): string {
+  switch (error.kind) {
+    case "fileNotFound":
+      return t("import.error.fileNotFound");
+    case "notText":
+      return t("import.error.notText");
+    case "tooLarge":
+      return t("import.error.tooLarge");
+    case "sourceChanged":
+      return t("import.error.sourceChanged");
+    case "noHosts":
+      return t("import.error.noHosts");
+    case "inventoryNotEmpty":
+      return t("import.error.inventoryNotEmpty");
+    case "identityNotFound":
+      return t("import.error.identityNotFound", { path: error.path });
+    default:
+      return t("startup.error.reference", { reference: error.reference });
+  }
+}
+
+function openSshSkipReasonText(t: ReturnType<typeof useI18n>["t"], reason: OpenSshSkipReason): string {
+  switch (reason.kind) {
+    case "unsupportedDirective":
+      return t("import.skip.unsupportedDirective", { directive: reason.directive });
+    case "globalRules":
+      return t("import.skip.globalRules", { directive: reason.directive });
+    case "duplicateAlias":
+      return t("import.skip.duplicateAlias");
+    case "invalidValue":
+      return t("import.skip.invalidValue", { directive: reason.directive });
+  }
 }
 
 function Empty({ children }: { children: React.ReactNode }) {

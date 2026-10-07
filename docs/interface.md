@@ -18,19 +18,24 @@ Contract: `web/app/src/inventory/api.ts` (`InventoryApi`). Screens: `inventory/h
 
 | Operation | What the core does |
 | --- | --- |
-| `areas()` | Which sidebar sources exist (`01-product-definition.md` §7.6): `favorites` when any host is a favorite, `recent` when the session history names a host, `groups` when any group exists, `keys` and `routes` when the user has reached them (a key used by two logins or opened from a host; a route created). |
+| `areas()` | Which sidebar sources exist (`01-product-definition.md` §7.6): `favorites` when any host is a favorite, `recent` when the session history names a host, `groups` when any group exists, `keys` when a credential has been promoted by reuse or inspection, and `routes` when a route exists. Implicit tier-0 credentials do not make Keys visible. |
 | `groups()` | Every group with its parent and host count. |
 | `hosts(source, query)` | Hosts from the source (all, favorites, recent, or one group and its subgroups) whose name, address, username, or `key:value` tag contains the query, case-insensitive; favorites first, then by name. Orphaned hosts are not listed. `username`, `loginCount`, and `route` describe the default login, else the only one. |
 | `recentSessions()` | The newest device-local session history entries, with the current Host label and login metadata. Entries whose Host or Login was deleted are omitted; no credential, scrollback, or live connection data is returned. Timestamps are decimal Unix-millisecond strings at the IPC boundary. |
-| `host(id)` | The host with every login, `null` when it no longer exists. A key credential carries its public key. |
-| `addHost(host)` | Creates the host, one login, and the credential, with a direct route, as one change (§7.6 tier 0). `name` defaults to the address and `port` to 22. Password and pasted or generated keys are stored as shared-binding credentials; a key file is read and stored the same way; `agent` creates an agent credential. Each `AddHostError` names the field it belongs to; nothing is saved on error. |
+| `host(id)` | The host with every login, `null` when it no longer exists. Inspecting a host promotes its implicit login; inspecting a private-key login also promotes that key credential. Password and agent credentials remain implicit. A key credential carries its public key. |
+| `addHost(host)` | Creates the host, one implicit login, and an implicit credential, with a direct route, as one change (§7.6 tier 0). `name` defaults to the address and `port` to 22. Password and pasted or generated keys are stored as shared-binding credentials; a key file is read and stored the same way; `agent` creates an agent credential. Reusing an existing private key on a second host reuses and promotes that credential in the same transaction; the reuse search is bounded at 4,096 private-key credentials and returns a clear error beyond that limit. Each `AddHostError` names the field it belongs to; nothing is saved on error. |
 | `setFavorite(id, favorite)` | Sets the favorite field. |
 | `deleteHost(id)` | Deletes the host, its logins, and unnamed credentials no other login uses, and returns a token. |
 | `undoDelete(token)` | Restores everything that deletion removed, for as long as the store keeps the tombstones. |
 | `chooseKeyFile()` | Opens the system file picker starting in `~/.ssh`, returns the path or `null`. |
+| `chooseOpenSshConfig()` | Opens a native picker for an OpenSSH config file, starting in `~/.ssh`; returns the path or `null` when canceled. The entry point is offered on the empty host list. |
+| `previewOpenSshConfig(path)` | Reads at most 1 MiB of UTF-8 text and returns the selected path, importable literal hosts, skipped hosts with reasons, and every unsupported directive with its source line. It does not write to the store or source file. The review dialog lists the complete report and disables Import when no host is representable. |
+| `importOpenSshConfig(preview)` | Available only while the host inventory is empty. Re-reads the source and rejects a changed preview, validates every host and identity file, then writes all importable hosts as one transaction. It returns imported hosts and the skip report; on an expected error, nothing is written. The source file is never modified. |
 | `onChange(listener)` | Calls the listener after any inventory change; built on the `storeChanged` event (`ipc/store-events.ts`). |
 
 Every operation that can fail returns `Outcome`; a `Failure` carries a reference for support, free of secrets.
+
+The tier-0 OpenSSH importer accepts simple literal `Host` blocks with `HostName`, `User`, `Port`, and `IdentityFile` values. It skips a host block when a directive or value in that block cannot be represented. Global settings, wildcard `Host` patterns, `Include`, and `Match` can affect other blocks, so the preview excludes every host in those files and explains why. Full OpenSSH semantics, `known_hosts`, keys discovery, and idempotent re-import belong to roadmap C10; this flow is limited to an empty inventory.
 
 ## Connecting a contract
 

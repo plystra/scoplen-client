@@ -156,9 +156,59 @@ export type AddHostError =
   | { kind: "emptyUsername" }
   | { kind: "emptyPassword" }
   | { kind: "keyNotFound" }
+  | { kind: "keyTooLarge" }
+  | { kind: "keyReuseLimit" }
   | { kind: "notAPrivateKey" }
   | { kind: "publicKey" }
   | { kind: "puttyKey" }
+  | { kind: "failed"; reference: string };
+
+export interface OpenSshImportEntry {
+  alias: string;
+  address: string;
+  port: number;
+  username: string;
+  identityFile: string | null;
+}
+
+export interface OpenSshUnsupportedDirective {
+  line: number;
+  directive: string;
+}
+
+export type OpenSshSkipReason =
+  | { kind: "unsupportedDirective"; directive: string }
+  | { kind: "globalRules"; directive: string }
+  | { kind: "duplicateAlias" }
+  | { kind: "invalidValue"; directive: string };
+
+export interface OpenSshSkippedHost {
+  alias: string;
+  line: number;
+  reason: OpenSshSkipReason;
+}
+
+export interface OpenSshImportPreview {
+  path: string;
+  entries: OpenSshImportEntry[];
+  skippedHosts: OpenSshSkippedHost[];
+  unsupported: OpenSshUnsupportedDirective[];
+}
+
+export interface OpenSshImportResult {
+  hosts: HostDetails[];
+  skippedHosts: OpenSshSkippedHost[];
+  unsupported: OpenSshUnsupportedDirective[];
+}
+
+export type OpenSshImportError =
+  | { kind: "fileNotFound" }
+  | { kind: "notText" }
+  | { kind: "tooLarge" }
+  | { kind: "sourceChanged" }
+  | { kind: "noHosts" }
+  | { kind: "inventoryNotEmpty" }
+  | { kind: "identityNotFound"; path: string }
   | { kind: "failed"; reference: string };
 
 export type Outcome<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
@@ -193,6 +243,9 @@ export interface InventoryApi {
   undoDelete(token: string): Promise<Outcome<null, Failure>>;
   /** Asks the system for a private key file; null when the user cancels. */
   chooseKeyFile(): Promise<string | null>;
+  chooseOpenSshConfig(): Promise<string | null>;
+  previewOpenSshConfig(path: string): Promise<Outcome<OpenSshImportPreview, OpenSshImportError>>;
+  importOpenSshConfig(preview: OpenSshImportPreview): Promise<Outcome<OpenSshImportResult, OpenSshImportError>>;
   /** Calls `listener` after any change to the inventory; returns a function that stops it. */
   onChange(listener: () => void): () => void;
 }

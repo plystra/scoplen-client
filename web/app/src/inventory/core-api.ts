@@ -20,6 +20,9 @@ import {
   type HostSummary as IpcHostSummary,
   type NewHost as IpcNewHost,
   type RecentSession as IpcRecentSession,
+  type OpenSshImportError as IpcOpenSshImportError,
+  type OpenSshImportPreview as IpcOpenSshImportPreview,
+  type OpenSshImportResult as IpcOpenSshImportResult,
 } from "../ipc/bindings";
 import type {
   AddHostError,
@@ -34,6 +37,9 @@ import type {
   HostSource,
   InventoryApi,
   NewHost,
+  OpenSshImportError,
+  OpenSshImportPreview,
+  OpenSshImportResult,
   Outcome,
   RecentSession,
 } from "./api";
@@ -102,6 +108,22 @@ export function createInventoryApi(): InventoryApi {
       if (result.status === "ok") return result.data;
       throw new Error(failure(result.error).reference);
     },
+    chooseOpenSshConfig: async () => {
+      const result = await commands.chooseOpenSshConfig();
+      if (result.status === "ok") return result.data;
+      throw new Error(failure(result.error).reference);
+    },
+    previewOpenSshConfig: async (path: string) =>
+      outcome(
+        (await commands.inventoryPreviewOpenSshConfig(path)) as Result<IpcOpenSshImportPreview, IpcOpenSshImportError>,
+      ) as Outcome<OpenSshImportPreview, OpenSshImportError>,
+    importOpenSshConfig: async (preview: OpenSshImportPreview) =>
+      outcome(
+        (await commands.inventoryImportOpenSshConfig(preview as IpcOpenSshImportPreview)) as Result<
+          IpcOpenSshImportResult,
+          IpcOpenSshImportError
+        >,
+      ) as Outcome<OpenSshImportResult, OpenSshImportError>,
     onChange: (listener) => {
       let stopped = false;
       let unlisten: (() => void | Promise<void>) | undefined;
