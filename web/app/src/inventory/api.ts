@@ -109,12 +109,14 @@ export interface CredentialSummary {
   restored: boolean;
 }
 
-/** Input for creating or replacing a credential. `secret` is write-only. */
+/** Input for creating or replacing a credential. Secret fields are write-only. */
 export interface CredentialInput {
   name: string | null;
   kind: CredentialKindInput;
   binding: CredentialBindingInput;
   secret: string | null;
+  /** Write-only material for a device binding; never returned by the core. */
+  deviceSecret: string | null;
   publicKey: string | null;
   provider: Record<string, string>;
   certificateScope: Id | null;
@@ -132,6 +134,7 @@ export interface RouteSummary {
   name: string;
   definition: RouteDefinition;
   profileCount: number;
+  orphaned: boolean;
   restored: boolean;
 }
 
@@ -154,6 +157,7 @@ export interface AccessProfileSummary {
   startupCommand: string | null;
   agentForwarding: boolean;
   isDefault: boolean;
+  orphaned: boolean;
   restored: boolean;
 }
 
@@ -338,6 +342,8 @@ export interface InventoryApi {
   createAccessProfile(profile: AccessProfileInput): Promise<Outcome<AccessProfileSummary, ObjectEditError>>;
   updateAccessProfile(id: Id, profile: AccessProfileInput): Promise<Outcome<AccessProfileSummary, ObjectEditError>>;
   deleteAccessProfile(id: Id): Promise<Outcome<null, ObjectEditError>>;
+  restoreOrphanedHost(id: Id): Promise<Outcome<null, ObjectEditError>>;
+  restoreOrphanedObject(id: Id): Promise<Outcome<null, ObjectEditError>>;
   credentials(): Promise<Outcome<CredentialSummary[], ObjectEditError>>;
   createCredential(credential: CredentialInput): Promise<Outcome<CredentialSummary, ObjectEditError>>;
   updateCredential(id: Id, credential: CredentialInput): Promise<Outcome<CredentialSummary, ObjectEditError>>;

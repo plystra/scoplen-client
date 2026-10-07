@@ -39,6 +39,8 @@ pub fn ipc() -> Builder<tauri::Wry> {
             inventory::inventory_create_access_profile,
             inventory::inventory_update_access_profile,
             inventory::inventory_delete_access_profile,
+            inventory::inventory_restore_orphaned_host,
+            inventory::inventory_restore_orphaned_object,
             inventory::inventory_credentials,
             inventory::inventory_create_credential,
             inventory::inventory_update_credential,

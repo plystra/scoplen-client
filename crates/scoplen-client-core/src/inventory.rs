@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::repository::{
     AccessProfile, AccessProfileChange, Change, Credential, CredentialBinding, CredentialChange,
     CredentialKind, Edit, Forward, Host, HostChange, HostGroup, HostGroupChange, RecordError,
-    Repository, Route, RouteChange, RouteChoice, RouteKind, credential_secret,
+    Repository, Route, RouteChange, RouteChoice, RouteKind, Workspace, credential_secret,
 };
 use crate::store::device::{SESSION_HISTORY_LIMIT, SessionKind, SessionOutcome};
 use crate::store::{LocalWrite, NewObject, Store, StoreError};
@@ -291,7 +291,9 @@ pub enum CredentialBindingInput {
 }
 
 /// A redacted credential object. The secret is represented only by
-/// `has_secret`; it is never returned over IPC.
+/// `has_secret`; it is never returned over IPC. For a device binding this
+/// reports whether this device has local material (the replicated record does
+/// not contain that material).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialSummary {
@@ -303,7 +305,7 @@ pub struct CredentialSummary {
     pub kind: CredentialKindInput,
     /// The binding of its material.
     pub binding: CredentialBindingInput,
-    /// Whether a shared secret is present; the secret itself is never exposed.
+    /// Whether material is present for the selected binding; the material itself is never exposed.
     pub has_secret: bool,
     /// The public half of a key, when one is available.
     pub public_key: Option<String>,
@@ -321,8 +323,10 @@ pub struct CredentialSummary {
 
 /// Input for creating or replacing a credential description.
 ///
-/// `secret` is accepted only for shared password/private-key credentials and
-/// is consumed by the core. It is not retained in any returned DTO.
+/// `secret` is accepted only for shared password/private-key credentials;
+/// `device_secret` is accepted only for device-bound password/private-key
+/// credentials. Both are consumed by the core and are not retained in any
+/// returned DTO.
 #[derive(Clone, Deserialize, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialInput {
@@ -334,6 +338,9 @@ pub struct CredentialInput {
     pub binding: CredentialBindingInput,
     /// A shared password or private-key text. Never returned by the core.
     pub secret: Option<String>,
+    /// Material for this device when `binding` is `device`. It is write-only
+    /// and is never returned by the core.
+    pub device_secret: Option<String>,
     /// Public key text for key and agent credentials.
     pub public_key: Option<String>,
     /// External provider reference fields (for example `type`, `path`, and
@@ -359,7 +366,10 @@ pub enum RouteDefinition {
     /// A local OpenSSH `ProxyCommand`.
     Command { command: String },
     /// A managed gateway network, authored by the organization.
-    Managed { gateway_network: String },
+    Managed {
+        #[serde(rename = "gatewayNetwork")]
+        gateway_network: String,
+    },
 }
 
 /// A redacted Route object.
@@ -374,6 +384,8 @@ pub struct RouteSummary {
     pub definition: RouteDefinition,
     /// Number of access profiles that reference this route.
     pub profile_count: u32,
+    /// Whether a jump profile or proxy credential is missing.
+    pub orphaned: bool,
     /// Whether a later write resurrected this route.
     pub restored: bool,
 }
@@ -418,6 +430,8 @@ pub struct AccessProfileSummary {
     pub agent_forwarding: bool,
     /// Whether this is the host's default profile.
     pub is_default: bool,
+    /// Whether one of this profile's referenced objects is missing or deleted.
+    pub orphaned: bool,
     /// Whether a later write resurrected this profile.
     pub restored: bool,
 }
@@ -931,6 +945,46 @@ impl Inventory {
         Ok(Some(profile_summary(&profile, &hosts, &credentials, &routes)?))
     }
 
+    /// Restores the tombstoned host that leaves an access profile orphaned.
+    ///
+    /// The profile itself remains live, so restoring the host is a normal
+    /// model write and makes the profile visible in the Hosts inventory again.
+    pub fn restore_orphaned_host(&self, host_id: String) -> Result<(), ObjectEditError> {
+        let id = parse_object_id(&host_id, "host")?;
+        let object = self.store.get(id).map_err(object_from_store)?;
+        let Some(object) = object else {
+            return Err(object_not_found("host"));
+        };
+        if object.object_type != scoplen_model::ObjectType::HOST || !object.is_tombstoned() {
+            return Err(object_not_found("orphaned host"));
+        }
+        self.store.restore_batch([id]).map_err(object_from_store)
+    }
+
+    /// Restores a tombstoned inventory object referenced by another live
+    /// object. Only user-owned inventory types can be restored through this
+    /// facade; managed organization objects remain server controlled.
+    pub fn restore_orphaned_object(&self, object_id: String) -> Result<(), ObjectEditError> {
+        let id = parse_object_id(&object_id, "object")?;
+        let object = self.store.get(id).map_err(object_from_store)?;
+        let Some(object) = object else {
+            return Err(object_not_found("orphaned object"));
+        };
+        if !object.is_tombstoned()
+            || !matches!(
+                object.object_type,
+                scoplen_model::ObjectType::HOST
+                    | scoplen_model::ObjectType::ACCESS_PROFILE
+                    | scoplen_model::ObjectType::CREDENTIAL
+                    | scoplen_model::ObjectType::ROUTE
+                    | scoplen_model::ObjectType::FORWARD
+            )
+        {
+            return Err(object_not_found("orphaned object"));
+        }
+        self.store.restore_batch([id]).map_err(object_from_store)
+    }
+
     /// Lists credentials with secrets redacted and usage counts attached.
     pub fn credentials_objects(&self) -> Result<Vec<CredentialSummary>, ObjectEditError> {
         let credentials = self.credentials().map_err(object_from_failure)?;
@@ -938,8 +992,8 @@ impl Inventory {
         let routes = self.routes().map_err(object_from_failure)?;
         let mut result = credentials
             .iter()
-            .map(|credential| credential_summary(credential, &profiles, &routes))
-            .collect::<Vec<_>>();
+            .map(|credential| self.credential_summary(credential, &profiles, &routes))
+            .collect::<Result<Vec<_>, _>>()?;
         result
             .sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
         Ok(result)
@@ -958,16 +1012,17 @@ impl Inventory {
         };
         let profiles = self.profiles().map_err(object_from_failure)?;
         let routes = self.routes().map_err(object_from_failure)?;
-        Ok(Some(credential_summary(&credential, &profiles, &routes)))
+        Ok(Some(self.credential_summary(&credential, &profiles, &routes)?))
     }
 
     /// Lists routes and how many profiles currently reference each route.
     pub fn routes_objects(&self) -> Result<Vec<RouteSummary>, ObjectEditError> {
         let routes = self.routes().map_err(object_from_failure)?;
         let profiles = self.profiles().map_err(object_from_failure)?;
+        let credentials = self.credentials().map_err(object_from_failure)?;
         let mut result = routes
             .iter()
-            .map(|route| route_summary(route, &profiles))
+            .map(|route| route_summary(route, &profiles, &credentials))
             .collect::<Result<Vec<_>, _>>()?;
         result
             .sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.id.cmp(&right.id)));
@@ -983,7 +1038,8 @@ impl Inventory {
             return Ok(None);
         };
         let profiles = self.profiles().map_err(object_from_failure)?;
-        Ok(Some(route_summary(&route, &profiles)?))
+        let credentials = self.credentials().map_err(object_from_failure)?;
+        Ok(Some(route_summary(&route, &profiles, &credentials)?))
     }
 
     /// Creates an AccessProfile and optionally makes it the host default.
@@ -1115,6 +1171,16 @@ impl Inventory {
             .map_err(object_from_record)?
             .iter()
             .any(|forward| forward.profile == Some(id))
+            || Repository::<Workspace>::new(&self.store)
+                .list()
+                .map_err(object_from_record)?
+                .iter()
+                .any(|workspace| workspace.sessions.values().any(|session| session.profile == id))
+            || self
+                .routes()
+                .map_err(object_from_failure)?
+                .iter()
+                .any(|route| matches!(&route.kind, RouteKind::Jump { hops } if hops.contains(&id)))
         {
             return Err(ObjectEditError::InUse);
         }
@@ -1126,20 +1192,41 @@ impl Inventory {
         &self,
         input: CredentialInput,
     ) -> Result<CredentialSummary, ObjectEditError> {
-        let (kind, binding, secret, public_key, provider, certificate_scope, name) =
+        let (kind, binding, secret, device_secret, public_key, provider, certificate_scope, name) =
             self.validate_credential_input(input, None)?;
-        let credential = Repository::<Credential>::new(&self.store)
-            .create(CredentialChange {
-                name: Edit::from_option(name),
-                kind: Some(kind),
-                binding: Some(binding),
-                secret: secret.map_or(Edit::Keep, |secret| Edit::Set(SecretVec::new(secret))),
-                public_key: Edit::from_option(public_key),
-                provider: provider.into_iter().map(|(key, value)| (key, Some(value))).collect(),
-                certificate_scope: Edit::from_option(certificate_scope),
-                ..Default::default()
-            })
-            .map_err(object_from_record)?;
+        let change = CredentialChange {
+            name: Edit::from_option(name),
+            kind: Some(kind),
+            binding: Some(binding),
+            secret: secret.map_or(Edit::Keep, |secret| Edit::Set(SecretVec::new(secret))),
+            public_key: Edit::from_option(public_key),
+            provider: provider.into_iter().map(|(key, value)| (key, Some(value))).collect(),
+            certificate_scope: Edit::from_option(certificate_scope),
+            ..Default::default()
+        };
+        let credential = if let Some(device_secret) = device_secret {
+            let fields = change.into_writes().map_err(object_from_record)?;
+            let created = self
+                .store
+                .write_with_device_credential(
+                    LocalWrite {
+                        id: None,
+                        object_type: scoplen_model::ObjectType::CREDENTIAL,
+                        fields,
+                    },
+                    Some(&device_secret),
+                    false,
+                )
+                .map_err(object_from_store)?;
+            Repository::<Credential>::new(&self.store)
+                .get(created.id)
+                .map_err(object_from_record)?
+                .ok_or_else(|| ObjectEditError::Failed {
+                    reference: "the credential disappeared after creation".into(),
+                })?
+        } else {
+            Repository::<Credential>::new(&self.store).create(change).map_err(object_from_record)?
+        };
         self.credential_object(id(credential.meta.id))?.ok_or(ObjectEditError::Failed {
             reference: "the credential disappeared after creation".into(),
         })
@@ -1158,36 +1245,45 @@ impl Inventory {
             .get(id)
             .map_err(object_from_record)?
             .ok_or_else(|| object_not_found("credential"))?;
-        let (kind, binding, secret, public_key, provider, certificate_scope, name) =
+        let (kind, binding, secret, device_secret, public_key, provider, certificate_scope, name) =
             self.validate_credential_input(input, Some(&existing))?;
         let secret_change = match secret {
             Some(secret) => Edit::Set(SecretVec::new(secret)),
             None if binding == CredentialBinding::Shared && existing.has_secret => Edit::Keep,
             None => Edit::Clear,
         };
-        credentials
-            .update(
-                id,
-                CredentialChange {
-                    name: Edit::from_option(name),
-                    kind: Some(kind),
-                    binding: Some(binding),
-                    secret: secret_change,
-                    public_key: Edit::from_option(public_key),
-                    provider: existing
-                        .provider
-                        .keys()
-                        .chain(provider.keys())
-                        .map(String::as_str)
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .map(|key| (key.to_owned(), provider.get(key).cloned()))
-                        .collect(),
-                    certificate_scope: Edit::from_option(certificate_scope),
-                    ..Default::default()
+        let fields = CredentialChange {
+            name: Edit::from_option(name),
+            kind: Some(kind),
+            binding: Some(binding),
+            secret: secret_change,
+            public_key: Edit::from_option(public_key),
+            provider: existing
+                .provider
+                .keys()
+                .chain(provider.keys())
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|key| (key.to_owned(), provider.get(key).cloned()))
+                .collect(),
+            certificate_scope: Edit::from_option(certificate_scope),
+            ..Default::default()
+        }
+        .into_writes()
+        .map_err(object_from_record)?;
+        self.store
+            .write_with_device_credential(
+                LocalWrite {
+                    id: Some(id),
+                    object_type: scoplen_model::ObjectType::CREDENTIAL,
+                    fields,
                 },
+                device_secret.as_deref(),
+                existing.binding == CredentialBinding::Device
+                    && binding != CredentialBinding::Device,
             )
-            .map_err(object_from_record)?;
+            .map_err(object_from_store)?;
         self.credential_object(credential_id)?.ok_or(ObjectEditError::Failed {
             reference: "the credential disappeared after editing".into(),
         })
@@ -1214,7 +1310,7 @@ impl Inventory {
         {
             return Err(ObjectEditError::InUse);
         }
-        credentials.delete(id).map_err(object_from_record)
+        self.store.delete_with_device_credential(id).map_err(object_from_store)
     }
 
     /// Creates a Route after validating all profile and credential references.
@@ -1341,6 +1437,7 @@ impl Inventory {
             kind: input_kind,
             binding: input_binding,
             secret,
+            device_secret,
             public_key,
             provider,
             certificate_scope,
@@ -1366,6 +1463,17 @@ impl Inventory {
                 }
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        if public_key.is_some()
+            && !matches!(kind, CredentialKind::PrivateKey | CredentialKind::Agent)
+        {
+            return Err(ObjectEditError::InvalidCredential);
+        }
+        if !provider.is_empty() && kind != CredentialKind::ExternalProvider {
+            return Err(ObjectEditError::InvalidCredential);
+        }
+        if certificate_scope.is_some() && kind != CredentialKind::Certificate {
+            return Err(ObjectEditError::InvalidCredential);
+        }
         let secret = match secret {
             Some(value) if value.is_empty() => return Err(ObjectEditError::SecretRequired),
             Some(value) => {
@@ -1377,7 +1485,14 @@ impl Inventory {
                 }
                 Some(value.into_bytes())
             }
-            None if existing.is_none() && binding == CredentialBinding::Shared => {
+            None if binding == CredentialBinding::Shared
+                && (existing.is_none()
+                    || existing.is_some_and(|credential| {
+                        credential.binding != CredentialBinding::Shared
+                            || !credential.has_secret
+                            || credential.kind != kind
+                    })) =>
+            {
                 return Err(ObjectEditError::SecretRequired);
             }
             None => None,
@@ -1391,7 +1506,37 @@ impl Inventory {
         if kind == CredentialKind::Certificate && certificate_scope.is_none() {
             return Err(ObjectEditError::InvalidCredential);
         }
-        Ok((kind, binding, secret, public_key, provider, certificate_scope, name))
+        let device_present = match existing {
+            Some(credential) if binding == CredentialBinding::Device && credential.kind == kind => {
+                self.store
+                    .device_credential(credential.meta.id)
+                    .map_err(object_from_store)?
+                    .is_some()
+            }
+            _ => false,
+        };
+        let device_secret = match device_secret {
+            Some(value) if value.is_empty() => return Err(ObjectEditError::SecretRequired),
+            Some(value) => {
+                if binding != CredentialBinding::Device
+                    || !matches!(kind, CredentialKind::Password | CredentialKind::PrivateKey)
+                {
+                    return Err(ObjectEditError::SecretNotAllowed);
+                }
+                if value.len() > scoplen_model::MAX_TEXT_BYTES {
+                    return Err(ObjectEditError::TextTooLong { field: "device secret".into() });
+                }
+                Some(value.into_bytes())
+            }
+            None if binding == CredentialBinding::Device
+                && matches!(kind, CredentialKind::Password | CredentialKind::PrivateKey)
+                && !device_present =>
+            {
+                return Err(ObjectEditError::SecretRequired);
+            }
+            None => None,
+        };
+        Ok((kind, binding, secret, device_secret, public_key, provider, certificate_scope, name))
     }
 
     fn validate_route_definition(
@@ -2092,7 +2237,11 @@ impl Inventory {
                 ids.push(credential_id);
             }
         }
-        self.store.delete_batch(ids.clone()).map_err(failure)?;
+        // Host deletion also removes unnamed credentials. Clear their
+        // device-local material in the same transaction; undo restores the
+        // replicated objects, while deleted local secrets must be entered
+        // again instead of silently returning.
+        self.store.delete_batch_with_device_credentials(ids.clone()).map_err(failure)?;
         let token = new_id().map_err(failure)?;
         self.deletions
             .pending
@@ -2161,6 +2310,7 @@ struct ValidatedProfile {
 type ValidatedCredential = (
     CredentialKind,
     CredentialBinding,
+    Option<Vec<u8>>,
     Option<Vec<u8>>,
     Option<String>,
     BTreeMap<String, String>,
@@ -2312,29 +2462,41 @@ fn host_default_write(host: Uuid, profile: Option<Uuid>) -> LocalWrite {
     }
 }
 
-fn credential_summary(
-    credential: &Credential,
-    profiles: &[AccessProfile],
-    routes: &[Route],
-) -> CredentialSummary {
-    CredentialSummary {
-        id: id(credential.meta.id),
-        name: credential.name.clone(),
-        kind: credential_kind_input(credential.kind),
-        binding: credential_binding_input(credential.binding),
-        has_secret: credential.has_secret,
-        public_key: credential.public_key.clone(),
-        provider: credential.provider.clone(),
-        certificate_scope: credential.certificate_scope.map(id),
-        profile_count: profiles
-            .iter()
-            .filter(|profile| profile.credential == Some(credential.meta.id))
-            .count() as u32,
-        route_count: routes
-            .iter()
-            .filter(|route| route_credential(route) == Some(credential.meta.id))
-            .count() as u32,
-        restored: credential.meta.restored,
+impl Inventory {
+    fn credential_summary(
+        &self,
+        credential: &Credential,
+        profiles: &[AccessProfile],
+        routes: &[Route],
+    ) -> Result<CredentialSummary, ObjectEditError> {
+        let has_secret = match credential.binding {
+            CredentialBinding::Shared => credential.has_secret,
+            CredentialBinding::Device => self
+                .store
+                .device_credential(credential.meta.id)
+                .map_err(object_from_store)?
+                .is_some(),
+            CredentialBinding::None => false,
+        };
+        Ok(CredentialSummary {
+            id: id(credential.meta.id),
+            name: credential.name.clone(),
+            kind: credential_kind_input(credential.kind),
+            binding: credential_binding_input(credential.binding),
+            has_secret,
+            public_key: credential.public_key.clone(),
+            provider: credential.provider.clone(),
+            certificate_scope: credential.certificate_scope.map(id),
+            profile_count: profiles
+                .iter()
+                .filter(|profile| profile.credential == Some(credential.meta.id))
+                .count() as u32,
+            route_count: routes
+                .iter()
+                .filter(|route| route_credential(route) == Some(credential.meta.id))
+                .count() as u32,
+            restored: credential.meta.restored,
+        })
     }
 }
 
@@ -2359,7 +2521,19 @@ fn route_definition(route: &Route) -> RouteDefinition {
 fn route_summary(
     route: &Route,
     profiles: &[AccessProfile],
+    credentials: &[Credential],
 ) -> Result<RouteSummary, ObjectEditError> {
+    let orphaned = match &route.kind {
+        RouteKind::Jump { hops } => {
+            hops.iter().any(|hop| !profiles.iter().any(|profile| profile.meta.id == *hop))
+        }
+        RouteKind::Socks5 { credential, .. } | RouteKind::HttpConnect { credential, .. } => {
+            credential.is_some_and(|credential| {
+                !credentials.iter().any(|item| item.meta.id == credential)
+            })
+        }
+        RouteKind::Command { .. } | RouteKind::Managed { .. } => false,
+    };
     Ok(RouteSummary {
         id: id(route.meta.id),
         name: route.name.clone(),
@@ -2368,6 +2542,7 @@ fn route_summary(
             .iter()
             .filter(|profile| profile.route == RouteChoice::Route(route.meta.id))
             .count() as u32,
+        orphaned,
         restored: route.meta.restored,
     })
 }
@@ -2387,6 +2562,9 @@ fn profile_summary(
         RouteChoice::Direct => None,
         RouteChoice::Route(id) => Some(id),
     };
+    let missing_host = host.is_none();
+    let missing_credential = profile.credential.is_some() && credential.is_none();
+    let missing_route = matches!(profile.route, RouteChoice::Route(route) if !routes.iter().any(|item| item.meta.id == route));
     Ok(AccessProfileSummary {
         id: id(profile.meta.id),
         host: id(profile.host),
@@ -2401,6 +2579,7 @@ fn profile_summary(
         startup_command: profile.startup_command.clone(),
         agent_forwarding: profile.agent_forwarding,
         is_default: host.is_some_and(|host| host.default_profile == Some(profile.meta.id)),
+        orphaned: missing_host || missing_credential || missing_route,
         restored: profile.meta.restored,
     })
 }
@@ -2834,8 +3013,13 @@ impl From<StoreError> for AddHostError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::repository::{CredentialChange, Edit};
+    use crate::repository::{
+        CredentialChange, Edit, ForwardChange, ForwardKind, Repository,
+        SessionKind as WorkspaceSessionKind, SessionSpec, Workspace, WorkspaceChange,
+    };
     use crate::store::Store;
     use crate::store::device::{SessionKind, SessionOutcome};
     use scoplen_crypto::LocalDatabaseKey;
@@ -2983,6 +3167,31 @@ mod tests {
         assert!(areas.favorites && !areas.keys);
         let hosts = inventory.hosts(HostSource::Favorites, "ROOT".into()).unwrap();
         assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn orphaned_profile_can_restore_its_tombstoned_host() {
+        let inventory = inventory();
+        let details = inventory
+            .add_host(NewHost {
+                name: Some("api".into()),
+                address: "api.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let host_id = parse_id(&details.summary.id).unwrap();
+        inventory.store.delete(host_id).unwrap();
+
+        let profiles = inventory.access_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].host_name, None);
+        inventory.restore_orphaned_host(details.summary.id.clone()).unwrap();
+        let restored = inventory.host(details.summary.id).unwrap().unwrap();
+        assert_eq!(restored.summary.name, "api");
+        assert!(restored.summary.restored);
+        assert_eq!(inventory.access_profiles().unwrap()[0].host_name.as_deref(), Some("api"));
     }
 
     #[test]
@@ -3399,6 +3608,7 @@ mod tests {
                 kind: CredentialKindInput::Password,
                 binding: CredentialBindingInput::Shared,
                 secret: Some("do-not-return".into()),
+                device_secret: None,
                 public_key: None,
                 provider: BTreeMap::new(),
                 certificate_scope: None,
@@ -3489,6 +3699,7 @@ mod tests {
                 kind: CredentialKindInput::SecurityKey,
                 binding: CredentialBindingInput::Shared,
                 secret: Some("secret".into()),
+                device_secret: None,
                 public_key: None,
                 provider: BTreeMap::new(),
                 certificate_scope: None,
@@ -3498,6 +3709,24 @@ mod tests {
         assert_eq!(
             inventory.store.list(scoplen_model::ObjectType::CREDENTIAL).unwrap().len(),
             before
+        );
+        let unresolved_device_key = inventory
+            .create_credential(CredentialInput {
+                name: Some("platform key".into()),
+                kind: CredentialKindInput::DeviceKey,
+                binding: CredentialBindingInput::None,
+                secret: None,
+                device_secret: None,
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .unwrap();
+        assert_eq!(unresolved_device_key.binding, CredentialBindingInput::None);
+        assert!(!unresolved_device_key.has_secret);
+        assert_eq!(
+            inventory.store.list(scoplen_model::ObjectType::CREDENTIAL).unwrap().len(),
+            before + 1
         );
         assert_eq!(
             inventory.create_route(RouteInput {
@@ -3509,6 +3738,347 @@ mod tests {
             }),
             Err(ObjectEditError::InvalidProxy)
         );
+        assert_eq!(
+            inventory.create_credential(CredentialInput {
+                name: Some("bad public key".into()),
+                kind: CredentialKindInput::Password,
+                binding: CredentialBindingInput::Shared,
+                secret: Some("secret".into()),
+                device_secret: None,
+                public_key: Some("ssh-ed25519 AAAA".into()),
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            }),
+            Err(ObjectEditError::InvalidCredential)
+        );
+        let device_credential = inventory
+            .create_credential(CredentialInput {
+                name: Some("device password".into()),
+                kind: CredentialKindInput::Password,
+                binding: CredentialBindingInput::Device,
+                secret: None,
+                device_secret: Some("only-on-this-device".into()),
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .unwrap();
+        assert!(device_credential.has_secret);
+        assert!(
+            inventory
+                .store
+                .device_credential(parse_id(&device_credential.id).unwrap())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            inventory
+                .update_credential(
+                    device_credential.id.clone(),
+                    CredentialInput {
+                        name: device_credential.name.clone(),
+                        kind: CredentialKindInput::Password,
+                        binding: CredentialBindingInput::Device,
+                        secret: None,
+                        device_secret: None,
+                        public_key: None,
+                        provider: BTreeMap::new(),
+                        certificate_scope: None,
+                    },
+                )
+                .unwrap()
+                .has_secret
+        );
+        assert_eq!(
+            inventory.update_credential(
+                device_credential.id.clone(),
+                CredentialInput {
+                    name: device_credential.name.clone(),
+                    kind: CredentialKindInput::Password,
+                    binding: CredentialBindingInput::Shared,
+                    secret: None,
+                    device_secret: None,
+                    public_key: None,
+                    provider: BTreeMap::new(),
+                    certificate_scope: None,
+                },
+            ),
+            Err(ObjectEditError::SecretRequired)
+        );
+        assert_eq!(
+            inventory.update_credential(
+                device_credential.id.clone(),
+                CredentialInput {
+                    name: device_credential.name.clone(),
+                    kind: CredentialKindInput::Key,
+                    binding: CredentialBindingInput::Device,
+                    secret: None,
+                    device_secret: None,
+                    public_key: Some("ssh-ed25519 AAAA".into()),
+                    provider: BTreeMap::new(),
+                    certificate_scope: None,
+                },
+            ),
+            Err(ObjectEditError::SecretRequired)
+        );
+        assert_eq!(
+            inventory.create_credential(CredentialInput {
+                name: Some("hardware".into()),
+                kind: CredentialKindInput::SecurityKey,
+                binding: CredentialBindingInput::Device,
+                secret: None,
+                device_secret: Some("must-not-be-pasted".into()),
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            }),
+            Err(ObjectEditError::SecretNotAllowed)
+        );
+        let device_id = parse_id(&device_credential.id).unwrap();
+        let shared = inventory
+            .update_credential(
+                device_credential.id.clone(),
+                CredentialInput {
+                    name: device_credential.name.clone(),
+                    kind: CredentialKindInput::Password,
+                    binding: CredentialBindingInput::Shared,
+                    secret: Some("now-shared".into()),
+                    device_secret: None,
+                    public_key: None,
+                    provider: BTreeMap::new(),
+                    certificate_scope: None,
+                },
+            )
+            .unwrap();
+        assert!(shared.has_secret);
+        assert!(inventory.store.device_credential(device_id).unwrap().is_none());
+        let deletable = inventory
+            .create_credential(CredentialInput {
+                name: Some("delete local material".into()),
+                kind: CredentialKindInput::Password,
+                binding: CredentialBindingInput::Device,
+                secret: None,
+                device_secret: Some("remove-me".into()),
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .unwrap();
+        let deletable_id = parse_id(&deletable.id).unwrap();
+        assert!(inventory.store.device_credential(deletable_id).unwrap().is_some());
+        inventory.delete_credential(deletable.id).unwrap();
+        assert!(inventory.store.device_credential(deletable_id).unwrap().is_none());
+        assert!(inventory.credential_object(id(deletable_id)).unwrap().is_none());
+        let credential = inventory
+            .create_credential(CredentialInput {
+                name: Some("rotating".into()),
+                kind: CredentialKindInput::Password,
+                binding: CredentialBindingInput::Shared,
+                secret: Some("password".into()),
+                device_secret: None,
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .unwrap();
+        assert_eq!(
+            inventory.update_credential(
+                credential.id,
+                CredentialInput {
+                    name: Some("rotating".into()),
+                    kind: CredentialKindInput::Key,
+                    binding: CredentialBindingInput::Shared,
+                    secret: None,
+                    device_secret: None,
+                    public_key: None,
+                    provider: BTreeMap::new(),
+                    certificate_scope: None,
+                },
+            ),
+            Err(ObjectEditError::SecretRequired)
+        );
         assert!(format!("{:?}", ObjectEditError::SecretRequired).contains("SecretRequired"));
+    }
+
+    #[test]
+    fn profile_deletion_rejects_jump_forward_and_workspace_references() {
+        let inventory = inventory();
+        let jump_host = inventory
+            .add_host(NewHost {
+                name: Some("jump".into()),
+                address: "jump.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let target_host = inventory
+            .add_host(NewHost {
+                name: Some("target".into()),
+                address: "target.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let jump_profile = parse_id(&jump_host.logins[0].id).unwrap();
+        let target_profile = parse_id(&target_host.logins[0].id).unwrap();
+
+        for (profile, host) in [(&jump_profile, &jump_host), (&target_profile, &target_host)] {
+            inventory
+                .update_access_profile(
+                    id(*profile),
+                    AccessProfileInput {
+                        host: host.summary.id.clone(),
+                        name: None,
+                        username: "ops".into(),
+                        credential: None,
+                        route: None,
+                        terminal_profile: None,
+                        startup_command: None,
+                        agent_forwarding: false,
+                        default_profile: false,
+                    },
+                )
+                .unwrap();
+        }
+
+        let jump_route = inventory
+            .create_route(RouteInput {
+                name: "jump chain".into(),
+                definition: RouteDefinition::Jump { hops: vec![id(jump_profile)] },
+            })
+            .unwrap();
+        assert_eq!(inventory.delete_access_profile(id(jump_profile)), Err(ObjectEditError::InUse));
+
+        Repository::<Forward>::new(&inventory.store)
+            .create(ForwardChange {
+                name: Some("local".into()),
+                kind: Some(ForwardKind::Local),
+                profile: Edit::Set(target_profile),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            inventory.delete_access_profile(id(target_profile)),
+            Err(ObjectEditError::InUse)
+        );
+
+        Repository::<Forward>::new(&inventory.store).list().unwrap().into_iter().for_each(
+            |forward| Repository::<Forward>::new(&inventory.store).delete(forward.meta.id).unwrap(),
+        );
+        Repository::<Workspace>::new(&inventory.store)
+            .create(WorkspaceChange {
+                name: Some("workspace".into()),
+                sessions: BTreeMap::from([(
+                    scoplen_model::new_uuid_v7().unwrap(),
+                    Some(SessionSpec {
+                        profile: target_profile,
+                        kind: WorkspaceSessionKind::Terminal,
+                        forward: None,
+                        working_directory: None,
+                    }),
+                )]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            inventory.delete_access_profile(id(target_profile)),
+            Err(ObjectEditError::InUse)
+        );
+
+        // Keep the route live for the test's full transaction and ensure its
+        // own reference is not accidentally removed by the failed deletes.
+        assert!(inventory.routes_objects().unwrap().iter().any(|route| route.id == jump_route.id));
+    }
+
+    #[test]
+    fn orphaned_references_are_listed_and_can_restore_the_missing_object() {
+        let inventory = inventory();
+        let host = inventory
+            .add_host(NewHost {
+                name: Some("orphaned".into()),
+                address: "orphaned.example".into(),
+                port: None,
+                username: "ops".into(),
+                sign_in: SignIn::Agent,
+            })
+            .unwrap();
+        let profile_id = parse_id(&host.logins[0].id).unwrap();
+        inventory
+            .update_access_profile(
+                id(profile_id),
+                AccessProfileInput {
+                    host: host.summary.id.clone(),
+                    name: None,
+                    username: "ops".into(),
+                    credential: None,
+                    route: None,
+                    terminal_profile: None,
+                    startup_command: None,
+                    agent_forwarding: false,
+                    default_profile: false,
+                },
+            )
+            .unwrap();
+        let credential = inventory
+            .create_credential(CredentialInput {
+                name: Some("orphan credential".into()),
+                kind: CredentialKindInput::Password,
+                binding: CredentialBindingInput::Shared,
+                secret: Some("secret".into()),
+                device_secret: None,
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .unwrap();
+        inventory
+            .update_access_profile(
+                id(profile_id),
+                AccessProfileInput {
+                    host: host.summary.id.clone(),
+                    name: None,
+                    username: "ops".into(),
+                    credential: Some(credential.id.clone()),
+                    route: None,
+                    terminal_profile: None,
+                    startup_command: None,
+                    agent_forwarding: false,
+                    default_profile: false,
+                },
+            )
+            .unwrap();
+        let credential_id = parse_id(&credential.id).unwrap();
+        inventory.store.delete_batch([credential_id]).unwrap();
+        assert!(inventory.access_profiles().unwrap()[0].orphaned);
+        inventory.restore_orphaned_object(credential.id).unwrap();
+        assert!(!inventory.access_profiles().unwrap()[0].orphaned);
+
+        let route = inventory
+            .create_route(RouteInput {
+                name: "orphan jump".into(),
+                definition: RouteDefinition::Jump { hops: vec![id(profile_id)] },
+            })
+            .unwrap();
+        inventory.store.delete_batch([profile_id]).unwrap();
+        assert!(
+            inventory
+                .routes_objects()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == route.id)
+                .is_some_and(|item| item.orphaned)
+        );
+        inventory.restore_orphaned_object(id(profile_id)).unwrap();
+        assert!(
+            !inventory
+                .routes_objects()
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == route.id)
+                .unwrap()
+                .orphaned
+        );
     }
 }

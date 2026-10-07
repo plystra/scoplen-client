@@ -45,6 +45,10 @@ export const commands = {
 	inventoryUpdateAccessProfile: (id: string, profile: AccessProfileInput) => typedError<AccessProfileSummary, ObjectEditError>(__TAURI_INVOKE("inventory_update_access_profile", { id, profile })),
 	/**  Deletes an independent access profile after reference checks. */
 	inventoryDeleteAccessProfile: (id: string) => typedError<null, ObjectEditError>(__TAURI_INVOKE("inventory_delete_access_profile", { id })),
+	/**  Restores the tombstoned host that leaves an access profile orphaned. */
+	inventoryRestoreOrphanedHost: (id: string) => typedError<null, ObjectEditError>(__TAURI_INVOKE("inventory_restore_orphaned_host", { id })),
+	/**  Restores a tombstoned user-owned object that another live object references. */
+	inventoryRestoreOrphanedObject: (id: string) => typedError<null, ObjectEditError>(__TAURI_INVOKE("inventory_restore_orphaned_object", { id })),
 	/**  Lists redacted independent credentials. */
 	inventoryCredentials: () => typedError<CredentialSummary[], ObjectEditError>(__TAURI_INVOKE("inventory_credentials")),
 	/**  Creates a redacted independent credential. */
@@ -149,6 +153,8 @@ export type AccessProfileSummary = {
 	agentForwarding: boolean,
 	/**  Whether this is the host's default profile. */
 	isDefault: boolean,
+	/**  Whether one of this profile's referenced objects is missing or deleted. */
+	orphaned: boolean,
 	/**  Whether a later write resurrected this profile. */
 	restored: boolean,
 };
@@ -216,8 +222,10 @@ export type CredentialBindingInput =
 /**
  *  Input for creating or replacing a credential description.
  * 
- *  `secret` is accepted only for shared password/private-key credentials and
- *  is consumed by the core. It is not retained in any returned DTO.
+ *  `secret` is accepted only for shared password/private-key credentials;
+ *  `device_secret` is accepted only for device-bound password/private-key
+ *  credentials. Both are consumed by the core and are not retained in any
+ *  returned DTO.
  */
 export type CredentialInput = {
 	/**  Optional display name. */
@@ -228,6 +236,11 @@ export type CredentialInput = {
 	binding: CredentialBindingInput,
 	/**  A shared password or private-key text. Never returned by the core. */
 	secret: string | null,
+	/**
+	 *  Material for this device when `binding` is `device`. It is write-only
+	 *  and is never returned by the core.
+	 */
+	deviceSecret: string | null,
 	/**  Public key text for key and agent credentials. */
 	publicKey: string | null,
 	/**
@@ -297,7 +310,9 @@ export type CredentialLabelKind =
 
 /**
  *  A redacted credential object. The secret is represented only by
- *  `has_secret`; it is never returned over IPC.
+ *  `has_secret`; it is never returned over IPC. For a device binding this
+ *  reports whether this device has local material (the replicated record does
+ *  not contain that material).
  */
 export type CredentialSummary = {
 	/**  The credential identifier. */
@@ -308,7 +323,7 @@ export type CredentialSummary = {
 	kind: CredentialKindInput,
 	/**  The binding of its material. */
 	binding: CredentialBindingInput,
-	/**  Whether a shared secret is present; the secret itself is never exposed. */
+	/**  Whether material is present for the selected binding; the material itself is never exposed. */
 	hasSecret: boolean,
 	/**  The public half of a key, when one is available. */
 	publicKey: string | null,
@@ -744,7 +759,7 @@ export type RouteDefinition =
 /**  A local OpenSSH `ProxyCommand`. */
 { kind: "command"; command: string } | 
 /**  A managed gateway network, authored by the organization. */
-{ kind: "managed"; gateway_network: string };
+{ kind: "managed"; gatewayNetwork: string };
 
 /**  Input for creating or replacing a Route. */
 export type RouteInput = {
@@ -785,6 +800,8 @@ export type RouteSummary = {
 	definition: RouteDefinition,
 	/**  Number of access profiles that reference this route. */
 	profileCount: number,
+	/**  Whether a jump profile or proxy credential is missing. */
+	orphaned: boolean,
 	/**  Whether a later write resurrected this route. */
 	restored: boolean,
 };

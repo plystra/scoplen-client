@@ -53,10 +53,16 @@ The C3 independent-object facade builds on those typed records rather than
 letting the interface edit raw fields. AccessProfiles, Credentials, and local
 Routes have separate redacted DTOs and input validation. Profile creation or
 replacement and the Host default reference are committed together, while
-deletion checks Forward, profile, and route references first. Credential input
-material is wrapped in `SecretVec` and is never present in a result, debug
-representation, or IPC error. Managed Routes remain readable but reject local
-create, update, and delete operations until the organization client owns them.
+deletion checks Forward, Workspace session, jump-route, profile, and route
+references first. Shared credential input material is wrapped in `SecretVec`;
+device-bound password and private-key input is written to the device-local
+credential table. Hardware-bound credentials never accept pasted material.
+Neither form is ever present in a result, debug representation, or IPC error.
+Managed Routes remain readable but reject local create, update, and delete
+operations until the organization client owns them. Profiles and Routes whose
+references were tombstoned by another device remain visible as orphaned items;
+the restore command writes the missing object through the normal model path,
+while deletion removes the dependent object after the usual reference checks.
 
 After every committed change the shell sends the frontend a `storeChanged` event with the type and identifiers of the changed objects; `useStoreChanges` (`web/app/src/ipc/store-events.ts`) subscribes to it. `LocalData` keeps the listener attached to whichever store is open, so events continue after unlocking or starting with empty data.
 

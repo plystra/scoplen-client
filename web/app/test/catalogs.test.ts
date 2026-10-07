@@ -17,6 +17,7 @@ const sample = {
   username: "deploy",
   label: "laptop",
   path: "/home/mia/.ssh/id_ed25519",
+  field: "name",
 };
 
 describe("message catalogs", () => {

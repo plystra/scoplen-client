@@ -12,7 +12,12 @@ const satisfies = (expression) =>
     .split(/\s+OR\s+/)
     .some((alternative) => alternative.split(/\s+AND\s+/).every((id) => allowed.has(id.trim())));
 
-const report = JSON.parse(execFileSync("pnpm", ["licenses", "list", "--json", "--prod"], { encoding: "utf8" }));
+const pnpmArgs = ["licenses", "list", "--json", "--prod"];
+const command =
+  process.platform === "win32"
+    ? [process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `pnpm.cmd ${pnpmArgs.join(" ")}`]]
+    : ["pnpm", pnpmArgs];
+const report = JSON.parse(execFileSync(command[0], command[1], { encoding: "utf8" }));
 const rejected = Object.entries(report)
   .filter(([license]) => !satisfies(license))
   .flatMap(([license, packages]) => packages.map((p) => `${p.name}@${p.versions.join(",")}: ${license}`));

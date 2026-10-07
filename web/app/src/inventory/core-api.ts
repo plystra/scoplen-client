@@ -137,6 +137,14 @@ export function createInventoryApi(): InventoryApi {
       inventoryObjectOutcome(
         (await commands.inventoryDeleteAccessProfile(id)) as Result<null, IpcObjectEditError>,
       ) as Outcome<null, ObjectEditError>,
+    restoreOrphanedHost: async (id: string) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryRestoreOrphanedHost(id)) as Result<null, IpcObjectEditError>,
+      ) as Outcome<null, ObjectEditError>,
+    restoreOrphanedObject: async (id: string) =>
+      inventoryObjectOutcome(
+        (await commands.inventoryRestoreOrphanedObject(id)) as Result<null, IpcObjectEditError>,
+      ) as Outcome<null, ObjectEditError>,
     credentials: async () =>
       inventoryObjectOutcome(
         (await commands.inventoryCredentials()) as Result<IpcCredentialSummary[], IpcObjectEditError>,

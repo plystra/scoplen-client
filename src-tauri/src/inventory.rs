@@ -251,6 +251,40 @@ pub async fn inventory_delete_access_profile(
         .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
 }
 
+/// Restores the tombstoned host that leaves an access profile orphaned.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_restore_orphaned_host(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+) -> Result<(), ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.restore_orphaned_host(id))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
+/// Restores a tombstoned user-owned object that another live object references.
+#[tauri::command]
+#[specta::specta]
+pub async fn inventory_restore_orphaned_object(
+    local: tauri::State<'_, LocalDataState>,
+    state: tauri::State<'_, InventoryState>,
+    id: String,
+) -> Result<(), ObjectEditError> {
+    let store = local
+        .store()
+        .ok_or_else(|| ObjectEditError::Failed { reference: "local data is locked".into() })?;
+    let inventory = Inventory::with_deletions(store, state.deletions.clone());
+    tauri::async_runtime::spawn_blocking(move || inventory.restore_orphaned_object(id))
+        .await
+        .map_err(|error| ObjectEditError::Failed { reference: error.to_string() })?
+}
+
 /// Lists redacted independent credentials.
 #[tauri::command]
 #[specta::specta]

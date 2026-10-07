@@ -259,6 +259,40 @@ impl Store {
         Ok(objects)
     }
 
+    /// Applies one credential object change and optionally updates its
+    /// device-local material in the same transaction. The local row is
+    /// deliberately not part of the replicated envelope.
+    pub(crate) fn write_with_device_credential(
+        &self,
+        write: LocalWrite,
+        secret: Option<&[u8]>,
+        remove_device_secret: bool,
+    ) -> Result<Object, StoreError> {
+        debug_assert_eq!(write.object_type, ObjectType::CREDENTIAL);
+        let (object, change) = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let object = apply_write(&tx, self.device_id, write)?;
+            if let Some(secret) = secret {
+                let updated_at = scoplen_model::system_time_millis()? as i64;
+                tx.execute(
+                    "INSERT INTO device_credentials (credential, secret, keystore_handle, updated_at) VALUES (?1, ?2, NULL, ?3)
+                     ON CONFLICT (credential) DO UPDATE SET secret = excluded.secret, keystore_handle = NULL, updated_at = excluded.updated_at",
+                    params![object.id.as_bytes().as_slice(), secret, updated_at],
+                )?;
+            } else if remove_device_secret {
+                tx.execute(
+                    "DELETE FROM device_credentials WHERE credential = ?1",
+                    params![object.id.as_bytes().as_slice()],
+                )?;
+            }
+            tx.commit()?;
+            (object.clone(), Change { object_type: object.object_type, ids: vec![object.id] })
+        };
+        self.notify(&change);
+        Ok(object)
+    }
+
     /// Creates several related objects in one transaction.
     pub fn create_batch(&self, creates: Vec<NewObject>) -> Result<Vec<Object>, StoreError> {
         self.create_batch_with_implicit(creates, Vec::new())
@@ -502,7 +536,24 @@ impl Store {
     where
         I: IntoIterator<Item = Uuid>,
     {
-        let ids = ids.into_iter().collect::<Vec<_>>();
+        self.delete_batch_inner(ids.into_iter().collect(), false)
+    }
+
+    /// Tombstones objects and removes any device-local credential rows in the
+    /// same transaction. This is used by host deletion, where unnamed
+    /// credentials are removed along with their only login.
+    pub(crate) fn delete_batch_with_device_credentials<I>(&self, ids: I) -> Result<(), StoreError>
+    where
+        I: IntoIterator<Item = Uuid>,
+    {
+        self.delete_batch_inner(ids.into_iter().collect(), true)
+    }
+
+    fn delete_batch_inner(
+        &self,
+        ids: Vec<Uuid>,
+        remove_device_credentials: bool,
+    ) -> Result<(), StoreError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -517,6 +568,12 @@ impl Store {
                 deletion.set_tombstone(Some(Tombstone::new(clock, self.device_id)?));
                 let deleted = scoplen_model::merge(&object, &deletion)?;
                 store_object(&tx, &deleted, None)?;
+                if remove_device_credentials {
+                    tx.execute(
+                        "DELETE FROM device_credentials WHERE credential = ?1",
+                        params![id.as_bytes().as_slice()],
+                    )?;
+                }
                 changed.push((deleted.object_type, id));
             }
             tx.commit()?;
@@ -525,6 +582,30 @@ impl Store {
         for change in changes {
             self.notify(&change);
         }
+        Ok(())
+    }
+
+    /// Tombstones one object and removes any device-local credential material
+    /// in the same transaction. This keeps deleting a credential from leaving
+    /// a secret that could be read if the tombstone is later inspected.
+    pub(crate) fn delete_with_device_credential(&self, id: Uuid) -> Result<(), StoreError> {
+        let change = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let object = read_object(&tx, id)?.ok_or(StoreError::NotFound(id))?;
+            let clock = next_clock(&tx)?;
+            let mut deletion = object.clone();
+            deletion.set_tombstone(Some(Tombstone::new(clock, self.device_id)?));
+            let deleted = scoplen_model::merge(&object, &deletion)?;
+            store_object(&tx, &deleted, None)?;
+            tx.execute(
+                "DELETE FROM device_credentials WHERE credential = ?1",
+                params![id.as_bytes().as_slice()],
+            )?;
+            tx.commit()?;
+            Change { object_type: deleted.object_type, ids: vec![id] }
+        };
+        self.notify(&change);
         Ok(())
     }
 

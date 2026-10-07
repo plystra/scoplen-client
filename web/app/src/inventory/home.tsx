@@ -17,12 +17,13 @@ import {
 } from "./api";
 import { HostDetailsPanel } from "./host-details";
 import { routeText } from "./labels";
+import type { ObjectSection } from "./objects";
 import { useLoad, type Loaded } from "./use-load";
 
 type Toast = { message: string; undo?: string } | null;
 
 /** The Hosts tab: where the inventory is, and the way into every session. */
-export function HostsHome() {
+export function HostsHome({ onOpenObjects }: { onOpenObjects?: (section: ObjectSection) => void } = {}) {
   const { t } = useI18n();
   const api = useInventory();
   const [source, setSource] = useState<HostSource>({ kind: "all" });
@@ -146,6 +147,9 @@ export function HostsHome() {
         favorites={areas.state === "ready" && areas.data.favorites}
         recent={areas.state === "ready" && areas.data.recent}
         groups={areas.state === "ready" && areas.data.groups ? groupList : []}
+        keys={areas.state === "ready" && areas.data.keys}
+        routes={areas.state === "ready" && areas.data.routes}
+        onOpenObjects={onOpenObjects}
       />
 
       <section aria-labelledby="hosts-title" className="@container flex min-w-0 flex-1 flex-col">
@@ -497,12 +501,18 @@ function Sidebar({
   favorites,
   recent,
   groups,
+  keys,
+  routes,
+  onOpenObjects,
 }: {
   source: HostSource;
   onSource: (source: HostSource) => void;
   favorites: boolean;
   recent: boolean;
   groups: GroupSummary[];
+  keys: boolean;
+  routes: boolean;
+  onOpenObjects?: (section: ObjectSection) => void;
 }) {
   const { t } = useI18n();
   const is = (other: HostSource) =>
@@ -546,6 +556,44 @@ function Sidebar({
           <h2 className="mb-1 px-3 text-xs font-medium text-muted-foreground">{t("hosts.groups")}</h2>
           <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
             {ordered.map(({ group, depth }) => item(group.name, { kind: "group", id: group.id }, depth))}
+          </ul>
+        </div>
+      ) : null}
+      {onOpenObjects ? (
+        <div>
+          <h2 className="mb-1 px-3 text-xs font-medium text-muted-foreground">{t("hosts.manage")}</h2>
+          <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+            <li>
+              <button
+                type="button"
+                onClick={() => onOpenObjects("logins")}
+                className="flex h-8 w-full items-center truncate rounded-md px-3 text-left text-sm text-muted-foreground hover:bg-inset hover:text-foreground"
+              >
+                {t("frame.logins")}
+              </button>
+            </li>
+            {keys ? (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => onOpenObjects("keys")}
+                  className="flex h-8 w-full items-center truncate rounded-md px-3 text-left text-sm text-muted-foreground hover:bg-inset hover:text-foreground"
+                >
+                  {t("frame.keys")}
+                </button>
+              </li>
+            ) : null}
+            {routes ? (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => onOpenObjects("routes")}
+                  className="flex h-8 w-full items-center truncate rounded-md px-3 text-left text-sm text-muted-foreground hover:bg-inset hover:text-foreground"
+                >
+                  {t("frame.routes")}
+                </button>
+              </li>
+            ) : null}
           </ul>
         </div>
       ) : null}

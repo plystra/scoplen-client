@@ -129,6 +129,7 @@ const sampleRouteSeeds: RouteSummary[] = [
     name: "prod-jump",
     definition: { kind: "jump", hops: ["l-4"] },
     profileCount: 0,
+    orphaned: false,
     restored: false,
   },
   {
@@ -136,6 +137,7 @@ const sampleRouteSeeds: RouteSummary[] = [
     name: "staging-net",
     definition: { kind: "managed", gatewayNetwork: "gw-staging-net" },
     profileCount: 0,
+    orphaned: false,
     restored: false,
   },
 ];
@@ -206,6 +208,7 @@ function profileSeeds(hosts: HostDetails[]): AccessProfileSummary[] {
       startupCommand: null,
       agentForwarding: false,
       isDefault: loginSummary.isDefault,
+      orphaned: false,
       restored: current.restored,
     })),
   );
@@ -403,18 +406,36 @@ export function sampleInventory(
           : session;
       });
   const profileRows = () =>
-    profiles.map((profile) => ({
-      ...profile,
-      hostName: hosts.find((current) => current.id === profile.host)?.name ?? null,
-      credential: credentialLabelForSummary(
-        objectCredentials.find((credential) => credential.id === profile.credentialId),
-      ),
-      route: profile.routeId
-        ? routeLabelForSummary(objectRoutes.find((route) => route.id === profile.routeId) ?? sampleRouteSeeds[0]!)
-        : { kind: "direct" as const },
-    }));
+    profiles.map((profile) => {
+      const hostRecord = hosts.find((current) => current.id === profile.host);
+      const credential = objectCredentials.find((item) => item.id === profile.credentialId);
+      const route = objectRoutes.find((item) => item.id === profile.routeId);
+      return {
+        ...profile,
+        hostName: hostRecord?.name ?? null,
+        credential: credentialLabelForSummary(credential),
+        route: profile.routeId ? (route ? routeLabelForSummary(route) : profile.route) : { kind: "direct" as const },
+        orphaned:
+          profile.orphaned ||
+          !hostRecord ||
+          Boolean(profile.credentialId && !credential) ||
+          Boolean(profile.routeId && !route),
+      };
+    });
   const credentialRows = () => countedCredentials(objectCredentials, profileRows(), objectRoutes);
-  const routeRows = () => countedRoutes(objectRoutes, profileRows());
+  const routeRows = () =>
+    countedRoutes(objectRoutes, profileRows()).map((route) => {
+      const definition = route.definition;
+      const orphanedJump =
+        definition.kind === "jump" && definition.hops.some((hop) => !profiles.some((profile) => profile.id === hop));
+      const orphanedProxy =
+        definition.kind === "socks5" || definition.kind === "httpConnect"
+          ? Boolean(
+              definition.credential && !objectCredentials.some((credential) => credential.id === definition.credential),
+            )
+          : false;
+      return { ...route, orphaned: route.orphaned || orphanedJump || orphanedProxy };
+    });
 
   const matches = (h: HostDetails, query: string) => {
     if (!query) return true;
@@ -592,6 +613,7 @@ export function sampleInventory(
         startupCommand: input.startupCommand?.trim() || null,
         agentForwarding: input.agentForwarding,
         isDefault: input.defaultProfile,
+        orphaned: false,
         restored: false,
       };
       profiles = [...profiles, created];
@@ -645,6 +667,22 @@ export function sampleInventory(
       changed();
       return wait(ok(null));
     },
+    restoreOrphanedHost: (id: Id) => {
+      const entry = [...deleted.entries()].find(([, host]) => host.id === id);
+      if (!entry) return wait(objectEditFailure("orphaned host not found"));
+      hosts = [...hosts, { ...entry[1], restored: true }];
+      deleted.delete(entry[0]);
+      changed();
+      return wait(ok(null));
+    },
+    restoreOrphanedObject: (id: Id) => {
+      const entry = [...deleted.entries()].find(([, host]) => host.id === id);
+      if (!entry) return wait(objectEditFailure("orphaned object not found"));
+      hosts = [...hosts, { ...entry[1], restored: true }];
+      deleted.delete(entry[0]);
+      changed();
+      return wait(ok(null));
+    },
     credentials: () => wait(ok(credentialRows())),
     createCredential: (input: CredentialInput) => {
       if (input.name !== null && !input.name.trim())
@@ -652,14 +690,19 @@ export function sampleInventory(
       if (input.binding === "shared" && (input.kind === "password" || input.kind === "key") && !input.secret) {
         return wait({ status: "error" as const, error: { kind: "secretRequired" as const } });
       }
+      if (input.binding === "device" && (input.kind === "password" || input.kind === "key") && !input.deviceSecret) {
+        return wait({ status: "error" as const, error: { kind: "secretRequired" as const } });
+      }
       if (input.secret && input.binding !== "shared")
+        return wait({ status: "error" as const, error: { kind: "secretNotAllowed" as const } });
+      if (input.deviceSecret && (input.binding !== "device" || (input.kind !== "password" && input.kind !== "key")))
         return wait({ status: "error" as const, error: { kind: "secretNotAllowed" as const } });
       const created: CredentialSummary = {
         id: `c-${Date.now()}`,
         name: input.name?.trim() || null,
         kind: input.kind,
         binding: input.binding,
-        hasSecret: Boolean(input.secret),
+        hasSecret: Boolean(input.secret || input.deviceSecret),
         publicKey: input.publicKey?.trim() || null,
         provider: { ...input.provider },
         certificateScope: input.certificateScope,
@@ -684,14 +727,29 @@ export function sampleInventory(
       ) {
         return wait({ status: "error" as const, error: { kind: "secretRequired" as const } });
       }
+      if (
+        input.binding === "device" &&
+        (input.kind === "password" || input.kind === "key") &&
+        !input.deviceSecret &&
+        (!current.hasSecret || current.binding !== "device" || current.kind !== input.kind)
+      ) {
+        return wait({ status: "error" as const, error: { kind: "secretRequired" as const } });
+      }
       if (input.secret && input.binding !== "shared")
+        return wait({ status: "error" as const, error: { kind: "secretNotAllowed" as const } });
+      if (input.deviceSecret && (input.binding !== "device" || (input.kind !== "password" && input.kind !== "key")))
         return wait({ status: "error" as const, error: { kind: "secretNotAllowed" as const } });
       const updated = {
         ...current,
         name: input.name?.trim() || null,
         kind: input.kind,
         binding: input.binding,
-        hasSecret: input.secret ? true : input.binding === "shared" ? current.hasSecret : false,
+        hasSecret:
+          input.secret || input.deviceSecret
+            ? true
+            : input.binding === "shared" || input.binding === "device"
+              ? current.hasSecret
+              : false,
         publicKey: input.publicKey?.trim() || null,
         provider: { ...input.provider },
         certificateScope: input.certificateScope,
@@ -727,6 +785,7 @@ export function sampleInventory(
         name: input.name.trim(),
         definition: input.definition,
         profileCount: 0,
+        orphaned: false,
         restored: false,
       };
       objectRoutes = [...objectRoutes, created];
