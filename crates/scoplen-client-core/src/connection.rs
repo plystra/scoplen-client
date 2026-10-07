@@ -19,7 +19,7 @@ use base64::{
 use scoplen_crypto::SecretVec;
 use scoplen_ssh::{
     ChannelEvent, ClientChannel, ClientConfig, ClientConnection, ClientError, HostKey,
-    HostKeyVerificationError, HostKeyVerifier, PtyRequest,
+    HostKeyVerificationError, HostKeyVerifier, PtyRequest, WindowChangeRequest,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -503,6 +503,18 @@ fn store_error(error: impl std::error::Error) -> ConnectionPlanError {
 pub const MAX_SSH_INPUT: usize = 64 * 1024;
 /// Maximum aggregate output retained by one session.
 pub const MAX_SSH_OUTPUT: usize = 8 * 1024 * 1024;
+/// Maximum supported terminal width or height in character cells.
+pub const MAX_TERMINAL_DIMENSION: u32 = 4096;
+
+/// Validate a terminal's character-cell dimensions for an SSH window change.
+pub fn terminal_size(columns: u32, rows: u32) -> Result<WindowChangeRequest, SshConnectionError> {
+    if !(1..=MAX_TERMINAL_DIMENSION).contains(&columns)
+        || !(1..=MAX_TERMINAL_DIMENSION).contains(&rows)
+    {
+        return Err(SshConnectionError::InvalidTerminalSize);
+    }
+    Ok(WindowChangeRequest { columns, rows, pixel_width: 0, pixel_height: 0 })
+}
 
 /// Host-key trust callback supplied by the client policy layer.
 pub type HostKeyTrust = Arc<dyn HostKeyVerifier + Send + Sync>;
@@ -576,6 +588,9 @@ pub enum SshConnectionError {
         /// Maximum accepted byte length.
         limit: usize,
     },
+    /// The requested PTY character-cell dimensions are invalid.
+    #[error("SSH terminal size must be between 1 and 4096 columns and rows")]
+    InvalidTerminalSize,
     /// Peer output exceeded the bounded session retention limit.
     #[error("SSH session output exceeds the {limit}-byte limit")]
     OutputTooLarge {
@@ -757,6 +772,13 @@ impl SshSession {
         Ok(())
     }
 
+    /// Notify a remote PTY of its new character-cell dimensions.
+    pub async fn resize(&self, columns: u32, rows: u32) -> Result<(), SshConnectionError> {
+        let request = terminal_size(columns, rows)?;
+        self.channel.window_change(&request).await?;
+        Ok(())
+    }
+
     /// Execute a command, optionally allocating a pseudo-terminal first.
     pub async fn exec(
         &mut self,
@@ -841,6 +863,19 @@ mod tests {
         let store = Store::open(&dir.path().join("local.db"), &LocalDatabaseKey::new([7; 32]))
             .expect("store");
         (dir, store)
+    }
+
+    #[test]
+    fn terminal_size_rejects_zero_and_oversized_dimensions() {
+        let valid = terminal_size(120, 40).expect("valid terminal size");
+        assert_eq!((valid.columns, valid.rows), (120, 40));
+        assert_eq!((valid.pixel_width, valid.pixel_height), (0, 0));
+        for (columns, rows) in [(0, 40), (120, 0), (MAX_TERMINAL_DIMENSION + 1, 40)] {
+            assert!(matches!(
+                terminal_size(columns, rows),
+                Err(SshConnectionError::InvalidTerminalSize)
+            ));
+        }
     }
 
     #[test]
