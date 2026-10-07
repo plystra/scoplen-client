@@ -308,6 +308,9 @@ pub async fn probe_host_key(
     if !matches!(&plan.route, ConnectionRoute::Direct) {
         return Err(SshConnectionError::UnsupportedRoute);
     }
+    if !matches!(&plan.credential, CredentialMaterial::Password(_)) {
+        return Err(SshConnectionError::UnsupportedCredential);
+    }
 
     let presented = Arc::new(Mutex::new(None::<HostKeyPresentation>));
     let capture = Arc::clone(&presented);
