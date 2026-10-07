@@ -7,7 +7,9 @@ The canonical architecture is `scoplen-docs/11-client-architecture.md`. This pag
 ```text
 web/app (React)  ── typed commands, binary channels ──  src-tauri  ──  scoplen-client-core
       │                                                                      │
-   web/ui (design system)                                         scoplen-client-platform
+   web/ui (design system)                              web/terminal (@scoplen/terminal)
+                                                            │
+                                               caller-owned Uint8Array streams
 ```
 
 - `web/app` renders state and sends intents. It never holds secrets, never performs cryptography, and never talks to the network.
@@ -20,6 +22,19 @@ web/app (React)  ── typed commands, binary channels ──  src-tauri  ─�
 Commands are declared in `src-tauri/src/commands.rs` with `#[specta::specta]`. `pnpm bindings` writes `web/app/src/ipc/bindings.ts` from them; a test fails when the committed file differs from what the commands generate, so the frontend and the core cannot drift.
 
 Streams use Tauri channels carrying raw binary frames: `FrameSender` on the Rust side (`src-tauri/src/frames.rs`) and `frameChannel` on the frontend (`web/app/src/ipc/frames.ts`). Frames arrive intact and in order; nothing is encoded as JSON.
+
+## Terminal package
+
+`web/terminal` publishes `@scoplen/terminal`, a framework-agnostic custom
+element and a React binding. The source and sink boundaries accept
+`Uint8Array` frames (including Web Streams); subscriptions receive an
+`AbortSignal` and must provide cancellation. The element serializes sink writes,
+enforces bounded output/input/pending-write limits, and cleans up source
+subscriptions when disconnected. The package has no Tauri or client-core
+dependency, so the server web console can consume the same API. Its current
+renderer is an intentionally small text preview; terminal emulation, WebGL,
+search, serialization, image protocols, IME, and compatibility suites remain
+later C4 work.
 
 ## Local data
 
