@@ -12,6 +12,29 @@ export const commands = {
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
 	/**  Called by the frontend once its first screen has rendered. */
 	shellReady: () => __TAURI_INVOKE<void>("shell_ready"),
+	/**  Returns which inventory areas have content. */
+	inventoryAreas: () => typedError<Areas, Failure>(__TAURI_INVOKE("inventory_areas")),
+	/**  Lists groups with live-host counts. */
+	inventoryGroups: () => typedError<GroupSummary[], Failure>(__TAURI_INVOKE("inventory_groups")),
+	/**  Lists hosts from a source, filtered by the optional query. */
+	inventoryHosts: (source: HostSource, query: string) => typedError<HostSummary[], Failure>(__TAURI_INVOKE("inventory_hosts", { source, query })),
+	/**  Reads one host and its logins. */
+	inventoryHost: (id: string) => typedError<({
+	/**  Plain-text notes. */
+	notes: string | null,
+	/**  All logins for this host. */
+	logins: LoginSummary[],
+}) & (HostSummary) | null, Failure>(__TAURI_INVOKE("inventory_host", { id })),
+	/**  Creates a host, credential, and default login as one operation. */
+	inventoryAddHost: (host: NewHost) => typedError<HostDetails, AddHostError>(__TAURI_INVOKE("inventory_add_host", { host })),
+	/**  Changes a host's favorite marker. */
+	inventorySetFavorite: (id: string, favorite: boolean) => typedError<null, Failure>(__TAURI_INVOKE("inventory_set_favorite", { id, favorite })),
+	/**  Tombstones a host and returns a short-lived undo token. */
+	inventoryDeleteHost: (id: string) => typedError<Deletion, Failure>(__TAURI_INVOKE("inventory_delete_host", { id })),
+	/**  Restores a deletion made by this running desktop process. */
+	inventoryUndoDelete: (token: string) => typedError<null, Failure>(__TAURI_INVOKE("inventory_undo_delete", { token })),
+	/**  Opens the native private-key file picker; `null` means cancellation. */
+	chooseKeyFile: () => typedError<string | null, Failure>(__TAURI_INVOKE("choose_key_file")),
 	/**  Where the local data stands. */
 	localDataStatus: () => typedError<Status, LocalDataError>(__TAURI_INVOKE("local_data_status")),
 	/**  Opens the store with the local passphrase. */
@@ -32,6 +55,29 @@ export const events = {
 };
 
 /* Types */
+/**  Why adding a host failed. Nothing is saved for any variant. */
+export type AddHostError = 
+/**  The address is empty or contains whitespace. */
+{ kind: "invalidAddress" } | 
+/**  The port is outside the TCP range. */
+{ kind: "invalidPort" } | 
+/**  The username is empty. */
+{ kind: "emptyUsername" } | 
+/**  The password is empty. */
+{ kind: "emptyPassword" } | 
+/**  The selected key file does not exist or could not be read. */
+{ kind: "keyNotFound" } | 
+/**  The input is not a private key. */
+{ kind: "notAPrivateKey" } | 
+/**  Public key text was supplied where private key text is needed. */
+{ kind: "publicKey" } | 
+/**  A PuTTY key is not accepted by the OpenSSH key reader. */
+{ kind: "puttyKey" } | 
+/**  A disk or model operation failed. */
+{ kind: "failed"; 
+/**  A diagnostic reference safe to show for retryable failures. */
+reference: string };
+
 /**  What the interface needs to know about the running application. */
 export type AppInfo = {
 	/**  The application version. */
@@ -40,6 +86,125 @@ export type AppInfo = {
 	platform: Platform,
 	/**  The interface language chosen from the system's preferences. */
 	locale: Locale,
+};
+
+/**  Which parts of the inventory have content to show. */
+export type Areas = {
+	/**  At least one host is marked as a favorite. */
+	favorites: boolean,
+	/**  At least one saved session refers to a host. */
+	recent: boolean,
+	/**  At least one host group exists. */
+	groups: boolean,
+	/**  At least one credential exists. */
+	keys: boolean,
+	/**  At least one non-direct route is used or saved. */
+	routes: boolean,
+};
+
+/**  A credential's non-secret display data. */
+export type CredentialLabel = {
+	/**  The credential identifier. */
+	id: string,
+	/**  Its kind in interface vocabulary. */
+	kind: CredentialLabelKind,
+	/**  The optional user-assigned name. */
+	name: string | null,
+	/**  The OpenSSH fingerprint, when available. */
+	fingerprint: string | null,
+	/**  The key comment, when available. */
+	comment: string | null,
+	/**  The public half of a key, when available. */
+	publicKey: string | null,
+};
+
+/**  Credential kinds understood by the inventory interface. */
+export type CredentialLabelKind = 
+/**  A password. */
+"password" | 
+/**  A private key. */
+"key" | 
+/**  A system SSH agent. */
+"agent" | 
+/**  A hardware security key. */
+"securityKey" | 
+/**  A non-exportable device key. */
+"deviceKey" | 
+/**  An external provider. */
+"external" | 
+/**  A short-lived certificate. */
+"certificate";
+
+/**  A deletion token returned to the interface. */
+export type Deletion = {
+	/**  An opaque token accepted by [`Inventory::undo_delete`]. */
+	token: string,
+};
+
+/**  A failure that can be retried by the interface. */
+export type Failure = 
+/**  The local store or model failed without changing the requested data. */
+{ kind: "failed"; 
+/**  A diagnostic reference safe to show for retryable failures. */
+reference: string };
+
+/**  A host group in the sidebar. */
+export type GroupSummary = {
+	/**  The group identifier. */
+	id: string,
+	/**  Display name. */
+	name: string,
+	/**  Parent group, if nested. */
+	parent: string | null,
+	/**  Number of live hosts in the group. */
+	hostCount: number,
+};
+
+/**  Details shown beside the host list. */
+export type HostDetails = {
+	/**  Plain-text notes. */
+	notes: string | null,
+	/**  All logins for this host. */
+	logins: LoginSummary[],
+} & HostSummary;
+
+/**  Which hosts to list. */
+export type HostSource = 
+/**  Every live host. */
+{ kind: "all" } | 
+/**  Hosts marked as favorites. */
+{ kind: "favorites" } | 
+/**  Hosts referenced by recent sessions. */
+{ kind: "recent" } | 
+/**  Hosts in one group. */
+{ kind: "group"; 
+/**  The group identifier. */
+id: string };
+
+/**  A row in the host list. */
+export type HostSummary = {
+	/**  The host identifier. */
+	id: string,
+	/**  Display name. */
+	name: string,
+	/**  DNS name or IP literal. */
+	address: string,
+	/**  SSH port. */
+	port: number,
+	/**  The default login's username. */
+	username: string | null,
+	/**  Number of logins for this host. */
+	loginCount: number,
+	/**  How its default login connects. */
+	route: RouteLabel,
+	/**  Whether it is a favorite. */
+	favorite: boolean,
+	/**  User tags. */
+	tags: { [key in string]: string },
+	/**  Group identifiers. */
+	groups: string[],
+	/**  Whether a later write resurrected it after deletion. */
+	restored: boolean,
 };
 
 /**  A failure of an operation on the local data, as shown to the user. */
@@ -70,6 +235,36 @@ export type Locale =
 "en" | 
 /**  Simplified Chinese. */
 "zh-Hans";
+
+/**  One login shown in host details. */
+export type LoginSummary = {
+	/**  The access profile identifier. */
+	id: string,
+	/**  Optional display name. */
+	name: string | null,
+	/**  Remote username. */
+	username: string,
+	/**  Its non-secret credential, if one is selected. */
+	credential: CredentialLabel | null,
+	/**  How this login reaches its host. */
+	route: RouteLabel,
+	/**  Whether it is the host's default login. */
+	isDefault: boolean,
+};
+
+/**  Input for the tier-0 add-host flow. */
+export type NewHost = {
+	/**  Display name; defaults to the address. */
+	name: string | null,
+	/**  DNS name or IP literal. */
+	address: string,
+	/**  SSH port; defaults to 22. */
+	port: number | null,
+	/**  Remote username. */
+	username: string,
+	/**  Authentication material. */
+	signIn: SignIn,
+};
 
 /**  The desktop platform the application runs on. */
 export type Platform = 
@@ -115,6 +310,46 @@ export type RecordType =
 "gatewayNetwork" | 
 /**  A type a newer version of Scoplen defines. */
 "unknown";
+
+/**  How a login reaches its host. */
+export type RouteLabel = 
+/**  A direct SSH connection. */
+{ kind: "direct" } | 
+/**  Through one or more jump hosts. */
+{ kind: "jump"; 
+/**  The route name. */
+name: string } | 
+/**  Through a SOCKS or HTTP proxy. */
+{ kind: "proxy"; 
+/**  The route name. */
+name: string } | 
+/**  Through a ProxyCommand. */
+{ kind: "command"; 
+/**  The route name. */
+name: string } | 
+/**  Through a managed gateway network. */
+{ kind: "bastion"; 
+/**  The route name. */
+name: string };
+
+/**  How a new host authenticates. */
+export type SignIn = 
+/**  Store a password in the encrypted personal object. */
+{ kind: "password"; 
+/**  The password to store in the encrypted local object. */
+password: string } | 
+/**  Read an OpenSSH private key from a path. */
+{ kind: "keyFile"; 
+/**  The path to an OpenSSH private key file. */
+path: string } | 
+/**  Use OpenSSH private-key text supplied by the user. */
+{ kind: "keyText"; 
+/**  OpenSSH private-key text. */
+key: string } | 
+/**  Generate a key (reserved for the key-generation flow). */
+{ kind: "generateKey" } | 
+/**  Resolve a key from the system agent. */
+{ kind: "agent" };
 
 /**  Whether the local data can be used, and if not, what is needed. */
 export type Status = 

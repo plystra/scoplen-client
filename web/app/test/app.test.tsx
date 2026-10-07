@@ -13,24 +13,37 @@ afterEach(() => clearMocks());
 type Handler = (cmd: string, args: Record<string, unknown>) => unknown;
 
 /** Mocks the core: `status` answers `local_data_status`; `handle` answers the rest. */
-function core(status: Status, handle: Handler = () => undefined, locale: AppInfo["locale"] = "en") {
+function defaultInventory(cmd: string): unknown {
+  if (cmd === "inventory_areas") return { favorites: false, recent: false, groups: false, keys: false, routes: false };
+  if (cmd === "inventory_groups" || cmd === "inventory_hosts") return [];
+  if (cmd === "inventory_host") return null;
+  if (cmd === "inventory_set_favorite" || cmd === "inventory_undo_delete") return null;
+  if (cmd === "inventory_delete_host") return { token: "00000000-0000-7000-8000-000000000000" };
+  if (cmd === "choose_key_file") return null;
+  return undefined;
+}
+
+function core(status: Status, handle: Handler = defaultInventory, locale: AppInfo["locale"] = "en") {
   const calls: { cmd: string; args: Record<string, unknown> }[] = [];
-  mockIPC((cmd, args) => {
-    const payload = (args ?? {}) as Record<string, unknown>;
-    calls.push({ cmd, args: payload });
-    if (cmd === "app_info") return { ...info, locale };
-    if (cmd === "local_data_status") return status;
-    return handle(cmd, payload);
-  });
+  mockIPC(
+    (cmd, args) => {
+      const payload = (args ?? {}) as Record<string, unknown>;
+      calls.push({ cmd, args: payload });
+      if (cmd === "app_info") return { ...info, locale };
+      if (cmd === "local_data_status") return status;
+      return handle(cmd, payload) ?? defaultInventory(cmd);
+    },
+    { shouldMockEvents: true },
+  );
   return calls;
 }
 
 describe("startup", () => {
-  it("opens on the about screen in the core's language and reports ready", async () => {
+  it("opens on the hosts screen in the core's language and reports ready", async () => {
     const calls = core({ state: "open", protection: "keystore" }, undefined, "zh-Hans");
     const { container } = render(<App />);
-    expect(await screen.findByRole("heading", { level: 1, name: "关于 Scoplen" })).toBeTruthy();
-    expect(screen.getByText("版本 0.1.0，适用于 macOS")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "还没有主机" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "添加主机" }).length).toBeGreaterThan(0);
     expect(document.documentElement.lang).toBe("zh-Hans");
     expect(calls.map((c) => c.cmd)).toContain("shell_ready");
     expect(await violations(container)).toEqual([]);
@@ -38,21 +51,25 @@ describe("startup", () => {
 
   it("explains a failure to reach the core and retries", async () => {
     let attempts = 0;
-    mockIPC((cmd) => {
-      if (cmd === "app_info") {
-        attempts += 1;
-        if (attempts === 1) throw new Error("ipc unavailable");
-        return info;
-      }
-      if (cmd === "local_data_status") return { state: "open", protection: "keystore" };
-    });
+    mockIPC(
+      (cmd) => {
+        if (cmd === "app_info") {
+          attempts += 1;
+          if (attempts === 1) throw new Error("ipc unavailable");
+          return info;
+        }
+        if (cmd === "local_data_status") return { state: "open", protection: "keystore" };
+        return defaultInventory(cmd);
+      },
+      { shouldMockEvents: true },
+    );
     const { container } = render(<App />);
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Nothing was changed.");
     expect(alert.textContent).toContain("ipc unavailable");
     expect(await violations(container)).toEqual([]);
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "About Scoplen" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "No hosts yet" })).toBeTruthy();
   });
 });
 
@@ -80,7 +97,7 @@ describe("unlocking", () => {
     await userEvent.clear(field);
     await userEvent.type(field, "right");
     await userEvent.click(screen.getByRole("button", { name: "Unlock" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "About Scoplen" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "No hosts yet" })).toBeTruthy();
   });
 });
 
@@ -103,7 +120,7 @@ describe("first launch without a keystore", () => {
     await userEvent.clear(screen.getByLabelText("Repeat passphrase"));
     await userEvent.type(screen.getByLabelText("Repeat passphrase"), "one");
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "About Scoplen" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "No hosts yet" })).toBeTruthy();
     expect(calls.find((c) => c.cmd === "create_local_passphrase")?.args).toEqual({ passphrase: "one" });
   });
 });
@@ -124,7 +141,7 @@ describe("unreadable local data", () => {
     await userEvent.click(screen.getByRole("button", { name: "Start with empty data" }));
     const buttons = screen.getAllByRole("button", { name: "Start with empty data" });
     await userEvent.click(buttons[0]!);
-    expect(await screen.findByRole("heading", { level: 1, name: "About Scoplen" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "No hosts yet" })).toBeTruthy();
   });
 
   it("does not offer to start over when a newer version wrote the data", async () => {
@@ -143,7 +160,7 @@ describe("settings", () => {
     });
     const { container } = render(<App />);
     await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Settings" }).getAttribute("aria-pressed")).toBe("true");
     await userEvent.click(screen.getByRole("button", { name: "Set passphrase" }));
     expect(await violations(container)).toEqual([]);
 
