@@ -9,6 +9,7 @@
 //! | Windows | A key held in the TPM through the Platform Crypto Provider where one is available; DPAPI for the current user otherwise |
 
 use std::path::Path;
+use uuid::Uuid;
 
 use zeroize::Zeroizing;
 
@@ -22,7 +23,7 @@ mod windows;
 #[derive(Debug, thiserror::Error)]
 pub enum KeystoreError {
     /// The keystore refused or failed the operation.
-    #[error("the {keystore} could not {operation} the local database key: {detail}")]
+    #[error("the {keystore} could not {operation} the protected secret: {detail}")]
     Platform {
         /// Which keystore failed.
         keystore: &'static str,
@@ -33,7 +34,7 @@ pub enum KeystoreError {
     },
     /// The stored key exists but cannot be read back on this device, for
     /// example because the TPM was cleared.
-    #[error("the {keystore} holds the local database key but can no longer unwrap it")]
+    #[error("the {keystore} holds a protected secret but can no longer unwrap it")]
     Unrecoverable {
         /// Which keystore failed.
         keystore: &'static str,
@@ -77,6 +78,28 @@ pub fn local_key_store(data_dir: &Path) -> Option<Box<dyn Keystore>> {
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = data_dir;
+        None
+    }
+}
+
+/// Returns a device-credential slot in the platform keystore.
+///
+/// Each credential gets a separate slot. The returned handle is deliberately
+/// opaque to the core: it is only persisted in the encrypted device-local
+/// table and is resolved by the platform adapter when a connection needs the
+/// key material.
+pub fn credential_key_store(data_dir: &Path, credential: Uuid) -> Option<Box<dyn Keystore>> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(Box::new(macos::Keychain::for_credential(data_dir, credential)))
+    }
+    #[cfg(windows)]
+    {
+        Some(Box::new(windows::WindowsKeystore::for_credential(data_dir, credential)))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (data_dir, credential);
         None
     }
 }

@@ -12,5 +12,6 @@ All notable changes to the Scoplen desktop client are recorded here.
 - Added protection of the local database key in the macOS Keychain and, on Windows, the TPM or DPAPI, with an optional local passphrase, a passphrase-only mode for systems without a keystore, and recovery by starting with empty data when the key is lost.
 - Added typed repositories for every object type, with field-level changes, clearing of optional fields, redacted credential secrets, and a `storeChanged` event to the interface after every committed change.
 - Added device-local records: this device's credential secrets and keystore handles, the device key pair, a bounded session history, scrollback, and window geometry, which the main window now uses to reopen where it was.
+- Added platform-keystore-backed `DeviceBoundKey` creation and resolution: each credential gets an opaque device-local handle and a per-device OpenSSH public key, while private material is resolved only at connection time and zeroized after use. `SecurityKey` remains an explicit unsupported capability until FIDO2/WebAuthn support is implemented; native non-exportable hardware signing remains a later platform outcome.
 - Added a macOS check that the application makes no network connection while sync is disabled.
 - Fixed Windows test executables failing to start because they lacked the Common Controls manifest.

@@ -6,6 +6,7 @@
 //! to the store, prefixed by the method that wrapped them.
 
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::{
@@ -45,6 +46,20 @@ impl WindowsKeystore {
         WindowsKeystore {
             file: data_dir.join(FILE),
             tpm_key_name: HSTRING::from(format!("Scoplen local database key {hash:016x}")),
+        }
+    }
+
+    pub(super) fn for_credential(data_dir: &Path, credential: Uuid) -> WindowsKeystore {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in data_dir.as_os_str().as_encoded_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+        for byte in credential.as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+        WindowsKeystore {
+            file: data_dir.join(format!("device-credential-{hash:016x}.protected")),
+            tpm_key_name: HSTRING::from(format!("Scoplen device credential {hash:016x}")),
         }
     }
 

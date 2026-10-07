@@ -654,7 +654,9 @@ export type ObjectEditError =
 /**  Managed routes are organization-authored and unavailable locally. */
 { kind: "managedRoute" } |
 /**  The local store or model failed without changing the requested object. */
-{ kind: "failed"; reference: string };
+{ kind: "failed"; reference: string } |
+/**  A platform-bound credential could not be created or removed. */
+{ kind: "platformCredential"; reference: string };
 
 /**
  *  A representable entry found in an OpenSSH configuration file. This is a

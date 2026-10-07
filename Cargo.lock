@@ -4214,10 +4214,14 @@ dependencies = [
 name = "scoplen-client-platform"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "p256 0.13.2",
  "security-framework",
  "sys-locale",
  "tempfile",
  "thiserror 2.0.21",
+ "uuid",
  "windows",
  "zeroize",
 ]

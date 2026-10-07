@@ -8,6 +8,7 @@
 //! Unsafe code is denied except in the modules that call platform APIs, where
 //! every block states why it is sound.
 
+pub mod credentials;
 pub mod keystore;
 
 /// The user's preferred languages as the operating system reports them, most

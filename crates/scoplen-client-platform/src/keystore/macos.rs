@@ -3,6 +3,7 @@
 //! The macOS Keychain.
 
 use std::path::Path;
+use uuid::Uuid;
 
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::passwords::{
@@ -29,6 +30,16 @@ pub(super) struct Keychain {
 impl Keychain {
     pub(super) fn for_data_dir(data_dir: &Path) -> Keychain {
         Keychain { account: format!("local-database-key:{}", data_dir.display()) }
+    }
+
+    pub(super) fn for_credential(data_dir: &Path, credential: Uuid) -> Keychain {
+        Keychain {
+            account: format!(
+                "device-credential:{}:{}",
+                data_dir.display(),
+                credential.hyphenated()
+            ),
+        }
     }
 
     /// The data-protection keychain item, readable after the first unlock

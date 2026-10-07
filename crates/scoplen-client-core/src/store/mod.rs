@@ -12,7 +12,7 @@ pub mod device;
 mod migrations;
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -129,6 +129,7 @@ type Listener = Arc<dyn Fn(&Change) + Send + Sync>;
 /// The local store. Cheap to share behind an `Arc`; calls are serialized.
 pub struct Store {
     conn: Mutex<Connection>,
+    data_dir: PathBuf,
     device_id: Uuid,
     listeners: Mutex<Vec<(u64, Listener)>>,
     next_listener: Mutex<u64>,
@@ -169,6 +170,7 @@ impl Store {
         let device_id = ensure_device(&conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
+            data_dir: path.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
             device_id,
             listeners: Mutex::new(Vec::new()),
             next_listener: Mutex::new(0),
@@ -178,6 +180,11 @@ impl Store {
     /// The identity of this device, used as the origin of its writes.
     pub fn device_id(&self) -> Uuid {
         self.device_id
+    }
+
+    /// Directory used to select this store's platform credential slots.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     /// The store's schema version.
@@ -271,6 +278,50 @@ impl Store {
         secret: Option<&[u8]>,
         remove_device_secret: bool,
     ) -> Result<Object, StoreError> {
+        self.write_with_device_material(write, secret, None, remove_device_secret)
+    }
+
+    /// Applies a credential object change and stores an opaque platform
+    /// keystore handle in the device-local table in the same transaction.
+    pub(crate) fn write_with_device_keystore_handle(
+        &self,
+        write: LocalWrite,
+        handle: &str,
+    ) -> Result<Object, StoreError> {
+        self.write_with_device_material(write, None, Some(handle), false)
+    }
+
+    /// Creates a credential object and stores its opaque platform keystore
+    /// handle in the device-local table in one transaction.
+    pub(crate) fn create_with_device_keystore_handle(
+        &self,
+        create: NewObject,
+        handle: &str,
+    ) -> Result<Object, StoreError> {
+        debug_assert_eq!(create.object_type, ObjectType::CREDENTIAL);
+        let (object, change) = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let object = apply_create(&tx, self.device_id, create)?;
+            let updated_at = scoplen_model::system_time_millis()? as i64;
+            tx.execute(
+                "INSERT INTO device_credentials (credential, secret, keystore_handle, updated_at) VALUES (?1, NULL, ?2, ?3)",
+                params![object.id.as_bytes().as_slice(), handle, updated_at],
+            )?;
+            tx.commit()?;
+            (object.clone(), Change { object_type: object.object_type, ids: vec![object.id] })
+        };
+        self.notify(&change);
+        Ok(object)
+    }
+
+    fn write_with_device_material(
+        &self,
+        write: LocalWrite,
+        secret: Option<&[u8]>,
+        handle: Option<&str>,
+        remove_device_secret: bool,
+    ) -> Result<Object, StoreError> {
         debug_assert_eq!(write.object_type, ObjectType::CREDENTIAL);
         let (object, change) = {
             let mut conn = self.conn();
@@ -282,6 +333,13 @@ impl Store {
                     "INSERT INTO device_credentials (credential, secret, keystore_handle, updated_at) VALUES (?1, ?2, NULL, ?3)
                      ON CONFLICT (credential) DO UPDATE SET secret = excluded.secret, keystore_handle = NULL, updated_at = excluded.updated_at",
                     params![object.id.as_bytes().as_slice(), secret, updated_at],
+                )?;
+            } else if let Some(handle) = handle {
+                let updated_at = scoplen_model::system_time_millis()? as i64;
+                tx.execute(
+                    "INSERT INTO device_credentials (credential, secret, keystore_handle, updated_at) VALUES (?1, NULL, ?2, ?3)
+                     ON CONFLICT (credential) DO UPDATE SET secret = NULL, keystore_handle = excluded.keystore_handle, updated_at = excluded.updated_at",
+                    params![object.id.as_bytes().as_slice(), handle, updated_at],
                 )?;
             } else if remove_device_secret {
                 tx.execute(

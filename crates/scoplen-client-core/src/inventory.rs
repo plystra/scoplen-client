@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use scoplen_client_platform::credentials;
 use scoplen_crypto::SecretVec;
 use scoplen_model::FieldPath;
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,9 @@ use uuid::Uuid;
 use crate::connection::{ConnectionPlan, ConnectionPlanError, resolve_connection_plan};
 use crate::repository::{
     AccessProfile, AccessProfileChange, Change, Credential, CredentialBinding, CredentialChange,
-    CredentialKind, Edit, Forward, Host, HostChange, HostGroup, HostGroupChange, RecordError,
-    Repository, Route, RouteChange, RouteChoice, RouteKind, Workspace, credential_secret,
+    CredentialKind, DeviceKey, Edit, Forward, Host, HostChange, HostGroup, HostGroupChange,
+    RecordError, Repository, Route, RouteChange, RouteChoice, RouteKind, Workspace,
+    credential_secret,
 };
 use crate::store::device::{SESSION_HISTORY_LIMIT, SessionKind, SessionOutcome};
 use crate::store::{LocalWrite, NewObject, Store, StoreError};
@@ -578,6 +580,9 @@ pub enum ObjectEditError {
     /// The local store or model failed without changing the requested object.
     #[error("{reference}")]
     Failed { reference: String },
+    /// A platform-bound credential could not be created or removed.
+    #[error("the platform credential operation failed: {reference}")]
+    PlatformCredential { reference: String },
 }
 
 /// The editable host metadata owned by the local inventory.
@@ -1271,19 +1276,92 @@ impl Inventory {
         &self,
         input: CredentialInput,
     ) -> Result<CredentialSummary, ObjectEditError> {
-        let (kind, binding, secret, device_secret, public_key, provider, certificate_scope, name) =
-            self.validate_credential_input(input, None)?;
+        let (
+            kind,
+            binding,
+            secret,
+            device_secret,
+            mut public_key,
+            provider,
+            certificate_scope,
+            name,
+        ) = self.validate_credential_input(input, None)?;
+        if kind == CredentialKind::SecurityKey
+            && credentials::security_key_capability()
+                == credentials::SecurityKeyCapability::Unsupported
+        {
+            return Err(ObjectEditError::PlatformCredential {
+                reference: "security-key support is unavailable in this build".into(),
+            });
+        }
+        let device_key =
+            if kind == CredentialKind::DeviceBoundKey && binding == CredentialBinding::Device {
+                let credential = new_id().map_err(object_from_store)?;
+                let identity = credentials::create_device_key(self.store.data_dir(), credential)
+                    .map_err(platform_credential)?;
+                public_key = Some(identity.public_key);
+                Some((credential, identity.handle))
+            } else {
+                None
+            };
+        let devices = device_key
+            .as_ref()
+            .map(|(_, _)| {
+                [(
+                    self.store.device_id(),
+                    Some(DeviceKey {
+                        public_key: public_key.clone().expect("generated device key public key"),
+                        label: name.clone().unwrap_or_else(|| "Scoplen device".into()),
+                    }),
+                )]
+                .into_iter()
+                .collect()
+            })
+            .unwrap_or_default();
         let change = CredentialChange {
             name: Edit::from_option(name),
             kind: Some(kind),
             binding: Some(binding),
             secret: secret.map_or(Edit::Keep, |secret| Edit::Set(SecretVec::new(secret))),
-            public_key: Edit::from_option(public_key),
+            devices,
+            public_key: if device_key.is_some() {
+                Edit::Clear
+            } else {
+                Edit::from_option(public_key)
+            },
             provider: provider.into_iter().map(|(key, value)| (key, Some(value))).collect(),
             certificate_scope: Edit::from_option(certificate_scope),
-            ..Default::default()
         };
-        let credential = if let Some(device_secret) = device_secret {
+        let credential = if let Some((credential_id, handle)) = device_key {
+            let fields = change.into_writes().map_err(object_from_record)?;
+            let result = self.store.create_with_device_keystore_handle(
+                NewObject {
+                    id: credential_id,
+                    object_type: scoplen_model::ObjectType::CREDENTIAL,
+                    fields,
+                },
+                &handle,
+            );
+            if let Err(error) = result {
+                if let Err(cleanup) =
+                    credentials::delete_device_key(self.store.data_dir(), credential_id, &handle)
+                {
+                    return Err(ObjectEditError::PlatformCredential {
+                        reference: format!(
+                            "credential write failed: {}; keystore cleanup failed: {cleanup}",
+                            diagnostic(&error)
+                        ),
+                    });
+                }
+                return Err(object_from_store(error));
+            }
+            Repository::<Credential>::new(&self.store)
+                .get(credential_id)
+                .map_err(object_from_record)?
+                .ok_or_else(|| ObjectEditError::Failed {
+                    reference: "the credential disappeared after creation".into(),
+                })?
+        } else if let Some(device_secret) = device_secret {
             let fields = change.into_writes().map_err(object_from_record)?;
             let created = self
                 .store
@@ -1324,8 +1402,56 @@ impl Inventory {
             .get(id)
             .map_err(object_from_record)?
             .ok_or_else(|| object_not_found("credential"))?;
-        let (kind, binding, secret, device_secret, public_key, provider, certificate_scope, name) =
-            self.validate_credential_input(input, Some(&existing))?;
+        let (
+            kind,
+            binding,
+            secret,
+            device_secret,
+            mut public_key,
+            provider,
+            certificate_scope,
+            name,
+        ) = self.validate_credential_input(input, Some(&existing))?;
+        if kind == CredentialKind::SecurityKey
+            && credentials::security_key_capability()
+                == credentials::SecurityKeyCapability::Unsupported
+        {
+            return Err(ObjectEditError::PlatformCredential {
+                reference: "security-key support is unavailable in this build".into(),
+            });
+        }
+        let old_device_handle = if existing.binding == CredentialBinding::Device {
+            self.store
+                .device_credential(id)
+                .map_err(object_from_store)?
+                .and_then(|device| device.keystore_handle)
+        } else {
+            None
+        };
+        let new_device_key = if kind == CredentialKind::DeviceBoundKey
+            && binding == CredentialBinding::Device
+            && existing.binding != CredentialBinding::Device
+        {
+            let identity = credentials::create_device_key(self.store.data_dir(), id)
+                .map_err(platform_credential)?;
+            public_key = Some(identity.public_key);
+            Some(identity.handle)
+        } else {
+            None
+        };
+        let devices = if new_device_key.is_some() {
+            [(
+                self.store.device_id(),
+                Some(DeviceKey {
+                    public_key: public_key.clone().expect("generated device key public key"),
+                    label: name.clone().unwrap_or_else(|| "Scoplen device".into()),
+                }),
+            )]
+            .into_iter()
+            .collect()
+        } else {
+            BTreeMap::new()
+        };
         let secret_change = match secret {
             Some(secret) => Edit::Set(SecretVec::new(secret)),
             None if binding == CredentialBinding::Shared && existing.has_secret => Edit::Keep,
@@ -1336,7 +1462,12 @@ impl Inventory {
             kind: Some(kind),
             binding: Some(binding),
             secret: secret_change,
-            public_key: Edit::from_option(public_key),
+            devices,
+            public_key: if kind == CredentialKind::DeviceBoundKey {
+                Edit::Clear
+            } else {
+                Edit::from_option(public_key)
+            },
             provider: existing
                 .provider
                 .keys()
@@ -1347,22 +1478,53 @@ impl Inventory {
                 .map(|key| (key.to_owned(), provider.get(key).cloned()))
                 .collect(),
             certificate_scope: Edit::from_option(certificate_scope),
-            ..Default::default()
         }
         .into_writes()
         .map_err(object_from_record)?;
-        self.store
-            .write_with_device_credential(
+        if let Some(handle) = new_device_key {
+            let result = self.store.write_with_device_keystore_handle(
                 LocalWrite {
                     id: Some(id),
                     object_type: scoplen_model::ObjectType::CREDENTIAL,
                     fields,
                 },
-                device_secret.as_deref(),
-                existing.binding == CredentialBinding::Device
-                    && binding != CredentialBinding::Device,
-            )
-            .map_err(object_from_store)?;
+                &handle,
+            );
+            if let Err(error) = result {
+                if let Err(cleanup) =
+                    credentials::delete_device_key(self.store.data_dir(), id, &handle)
+                {
+                    return Err(ObjectEditError::PlatformCredential {
+                        reference: format!(
+                            "credential write failed: {}; keystore cleanup failed: {cleanup}",
+                            diagnostic(&error)
+                        ),
+                    });
+                }
+                return Err(object_from_store(error));
+            }
+        } else {
+            self.store
+                .write_with_device_credential(
+                    LocalWrite {
+                        id: Some(id),
+                        object_type: scoplen_model::ObjectType::CREDENTIAL,
+                        fields,
+                    },
+                    device_secret.as_deref(),
+                    existing.binding == CredentialBinding::Device
+                        && binding != CredentialBinding::Device,
+                )
+                .map_err(object_from_store)?;
+        }
+        if existing.binding == CredentialBinding::Device
+            && binding != CredentialBinding::Device
+            && existing.kind == CredentialKind::DeviceBoundKey
+            && let Some(handle) = old_device_handle
+        {
+            credentials::delete_device_key(self.store.data_dir(), id, &handle)
+                .map_err(platform_credential)?;
+        }
         self.credential_object(credential_id)?.ok_or(ObjectEditError::Failed {
             reference: "the credential disappeared after editing".into(),
         })
@@ -1372,7 +1534,7 @@ impl Inventory {
     pub fn delete_credential(&self, credential_id: String) -> Result<(), ObjectEditError> {
         let id = parse_object_id(&credential_id, "credential")?;
         let credentials = Repository::<Credential>::new(&self.store);
-        credentials
+        let credential = credentials
             .get(id)
             .map_err(object_from_record)?
             .ok_or_else(|| object_not_found("credential"))?;
@@ -1389,7 +1551,22 @@ impl Inventory {
         {
             return Err(ObjectEditError::InUse);
         }
-        self.store.delete_with_device_credential(id).map_err(object_from_store)
+        let device_handle = if credential.kind == CredentialKind::DeviceBoundKey
+            && credential.binding == CredentialBinding::Device
+        {
+            self.store
+                .device_credential(id)
+                .map_err(object_from_store)?
+                .and_then(|device| device.keystore_handle)
+        } else {
+            None
+        };
+        self.store.delete_with_device_credential(id).map_err(object_from_store)?;
+        if let Some(handle) = device_handle {
+            credentials::delete_device_key(self.store.data_dir(), id, &handle)
+                .map_err(platform_credential)?;
+        }
+        Ok(())
     }
 
     /// Creates a Route after validating all profile and credential references.
@@ -2615,6 +2792,10 @@ fn object_from_store(error: StoreError) -> ObjectEditError {
     ObjectEditError::Failed { reference: diagnostic(&error) }
 }
 
+fn platform_credential(error: credentials::CredentialError) -> ObjectEditError {
+    ObjectEditError::PlatformCredential { reference: error.to_string() }
+}
+
 fn object_from_failure(error: Failure) -> ObjectEditError {
     match error {
         Failure::Failed { reference } => ObjectEditError::Failed { reference },
@@ -2663,7 +2844,11 @@ impl Inventory {
             kind: credential_kind_input(credential.kind),
             binding: credential_binding_input(credential.binding),
             has_secret,
-            public_key: credential.public_key.clone(),
+            public_key: credential
+                .devices
+                .get(&self.store.device_id())
+                .map(|device| device.public_key.clone())
+                .or_else(|| credential.public_key.clone()),
             provider: credential.provider.clone(),
             certificate_scope: credential.certificate_scope.map(id),
             profile_count: profiles
@@ -4215,6 +4400,56 @@ mod tests {
             Err(ObjectEditError::SecretRequired)
         );
         assert!(format!("{:?}", ObjectEditError::SecretRequired).contains("SecretRequired"));
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn device_bound_key_creation_persists_a_platform_handle_and_resolves_it() {
+        let inventory = inventory();
+        let summary = inventory
+            .create_credential(CredentialInput {
+                name: Some("device key".into()),
+                kind: CredentialKindInput::DeviceKey,
+                binding: CredentialBindingInput::Device,
+                secret: None,
+                device_secret: None,
+                public_key: None,
+                provider: BTreeMap::new(),
+                certificate_scope: None,
+            })
+            .expect("platform keystore device key");
+        assert!(summary.has_secret);
+        assert!(summary.public_key.as_deref().unwrap().starts_with("ecdsa-sha2-nistp256 "));
+        let credential = parse_id(&summary.id).unwrap();
+        let material = inventory.store.device_credential(credential).unwrap().unwrap();
+        let handle = material.keystore_handle.unwrap();
+        let resolved =
+            credentials::resolve_device_key(inventory.store.data_dir(), credential, &handle)
+                .expect("resolve platform key");
+        assert_eq!(resolved.secret.len(), 32);
+
+        inventory.delete_credential(summary.id).unwrap();
+        assert!(inventory.store.device_credential(credential).unwrap().is_none());
+        assert!(matches!(
+            credentials::resolve_device_key(inventory.store.data_dir(), credential, &handle),
+            Err(credentials::CredentialError::InvalidHandle)
+        ));
+    }
+
+    #[test]
+    fn security_key_creation_reports_capability_failure_instead_of_fake_material() {
+        let inventory = inventory();
+        let result = inventory.create_credential(CredentialInput {
+            name: Some("security key".into()),
+            kind: CredentialKindInput::SecurityKey,
+            binding: CredentialBindingInput::Device,
+            secret: None,
+            device_secret: None,
+            public_key: None,
+            provider: BTreeMap::new(),
+            certificate_scope: None,
+        });
+        assert!(matches!(result, Err(ObjectEditError::PlatformCredential { .. })));
     }
 
     #[test]

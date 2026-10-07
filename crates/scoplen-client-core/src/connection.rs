@@ -16,6 +16,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
+use scoplen_client_platform::credentials;
 use scoplen_crypto::SecretVec;
 use scoplen_ssh::{
     ChannelEvent, ClientChannel, ClientConfig, ClientConnection, ClientError, HostKey,
@@ -448,7 +449,7 @@ fn resolve_credential(
                 device.secret.map(CredentialMaterial::PrivateKey)
             };
             Ok(material.unwrap_or(CredentialMaterial::DeviceKey {
-                public_key: credential.public_key.clone(),
+                public_key: device_public_key(store, credential),
                 secret: None,
                 keystore_handle: device.keystore_handle,
             }))
@@ -456,11 +457,16 @@ fn resolve_credential(
         (CredentialKind::Agent, CredentialBinding::None) => Ok(CredentialMaterial::Agent),
         (CredentialKind::SecurityKey, CredentialBinding::None)
         | (CredentialKind::SecurityKey, CredentialBinding::Device) => {
-            Ok(CredentialMaterial::SecurityKey { public_key: credential.public_key.clone() })
+            if credentials::security_key_capability()
+                == credentials::SecurityKeyCapability::Unsupported
+            {
+                return Err(ConnectionPlanError::CredentialUnavailable);
+            }
+            Ok(CredentialMaterial::SecurityKey { public_key: device_public_key(store, credential) })
         }
         (CredentialKind::DeviceBoundKey, CredentialBinding::None) => {
             Ok(CredentialMaterial::DeviceKey {
-                public_key: credential.public_key.clone(),
+                public_key: device_public_key(store, credential),
                 secret: None,
                 keystore_handle: None,
             })
@@ -473,8 +479,18 @@ fn resolve_credential(
             if device.secret.is_none() && device.keystore_handle.is_none() {
                 return Err(ConnectionPlanError::CredentialUnavailable);
             }
+            if let Some(handle) = device.keystore_handle {
+                let resolved =
+                    credentials::resolve_device_key(store.data_dir(), credential.meta.id, &handle)
+                        .map_err(|_| ConnectionPlanError::CredentialUnavailable)?;
+                return Ok(CredentialMaterial::DeviceKey {
+                    public_key: device_public_key(store, credential),
+                    secret: Some(SecretVec::new(resolved.secret.to_vec())),
+                    keystore_handle: Some(handle),
+                });
+            }
             Ok(CredentialMaterial::DeviceKey {
-                public_key: credential.public_key.clone(),
+                public_key: device_public_key(store, credential),
                 secret: device.secret,
                 keystore_handle: device.keystore_handle,
             })
@@ -493,6 +509,14 @@ fn shared_secret(store: &Store, credential: &Credential) -> Result<SecretVec, Co
     crate::repository::credential_secret(store, credential.meta.id)
         .map_err(store_error)?
         .ok_or(ConnectionPlanError::CredentialUnavailable)
+}
+
+fn device_public_key(store: &Store, credential: &Credential) -> Option<String> {
+    credential
+        .devices
+        .get(&store.device_id())
+        .map(|device| device.public_key.clone())
+        .or_else(|| credential.public_key.clone())
 }
 
 fn store_error(error: impl std::error::Error) -> ConnectionPlanError {

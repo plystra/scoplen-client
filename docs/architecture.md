@@ -58,9 +58,17 @@ Routes have separate redacted DTOs and input validation. Profile creation or
 replacement and the Host default reference are committed together, while
 deletion checks Forward, Workspace session, jump-route, profile, and route
 references first. Shared credential input material is wrapped in `SecretVec`;
-device-bound password and private-key input is written to the device-local
-credential table. Hardware-bound credentials never accept pasted material.
-Neither form is ever present in a result, debug representation, or IPC error.
+device-bound password input is written to the device-local credential table.
+Creating a device-bound key asks the platform crate to generate a P-256 key,
+protect the scalar in a per-credential macOS Keychain or Windows keystore slot,
+and return an opaque `device-keystore-v1:<credential-id>` handle. The
+credential object stores this device's OpenSSH public key in its `devices` map;
+the local table stores only the handle. Connection planning validates the
+handle, resolves it just before signing, and wraps the returned scalar in
+`SecretVec`. Hardware-bound credentials never accept pasted material, and
+`SecurityKey` returns a typed unsupported-capability error until the
+libfido2/WebAuthn interaction boundary is implemented. Neither private form
+is ever present in a result, debug representation, or IPC error.
 Managed Routes remain readable but reject local create, update, and delete
 operations until the organization client owns them. Profiles and Routes whose
 references were tombstoned by another device remain visible as orphaned items;
@@ -103,7 +111,7 @@ Messages are ICU MessageFormat catalogs in `web/app/src/messages`. English (`en.
 
 ## Device-local records
 
-Records that never replicate (`04-object-model.md` §4.9) live in the same encrypted store, in their own tables (migration 2): this device's half of device-bound credentials, as a stored secret or a keystore handle; the device key pair, created at sync enrollment; the session history, limited to the 1,000 most recent sessions; saved scrollback; and window geometry. None of them is an object, so sync never sends them. Secrets come back as `SecretVec`, which is zeroized when dropped and redacted when formatted. The main window's size and position are saved when it closes and restored at the next launch if they are still on a display.
+Records that never replicate (`04-object-model.md` §4.9) live in the same encrypted store, in their own tables (migration 2): this device's half of device-bound credentials, as a stored secret or a keystore handle; the device key pair, created at sync enrollment; the session history, limited to the 1,000 most recent sessions; saved scrollback; and window geometry. None of them is an object, so sync never sends them. Device-key handles are opaque references to platform slots and are invalidated when the credential is deleted or changed away from a device-bound key. Secrets resolved from either the encrypted table or a platform slot come back as `SecretVec`, which is zeroized when dropped and redacted when formatted. The main window's size and position are saved when it closes and restored at the next launch if they are still on a display.
 
 ## No network while sync is disabled
 
