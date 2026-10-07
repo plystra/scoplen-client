@@ -129,6 +129,34 @@ fn invalid_objects_are_rejected_and_nothing_is_written() {
 }
 
 #[test]
+fn create_batch_rolls_back_when_a_later_object_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("local.db"), &key(1)).unwrap();
+    let first_id = scoplen_model::new_uuid_v7().unwrap();
+    let second_id = scoplen_model::new_uuid_v7().unwrap();
+
+    let result = store.create_batch(vec![
+        NewObject {
+            id: first_id,
+            object_type: ObjectType::HOST,
+            fields: vec![
+                (FieldPath::Field(1), Value::Text("valid".into())),
+                (FieldPath::Field(2), Value::Text("valid.example".into())),
+            ],
+        },
+        NewObject {
+            id: second_id,
+            object_type: ObjectType::HOST,
+            fields: vec![(FieldPath::Field(1), Value::Text("missing address".into()))],
+        },
+    ]);
+
+    assert!(matches!(result, Err(StoreError::Model(_))));
+    assert!(store.get(first_id).unwrap().is_none());
+    assert!(store.get(second_id).unwrap().is_none());
+}
+
+#[test]
 fn changing_a_missing_object_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("local.db"), &key(1)).unwrap();
