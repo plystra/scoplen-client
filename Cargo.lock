@@ -4224,7 +4224,7 @@ dependencies = [
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=79ea0b8#79ea0b87a93e5cd3727ca3d896855904ca980e56"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=7b20176#7b20176ad29046b270e99991e3a6b45b76b5afb6"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
@@ -4249,7 +4249,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=79ea0b8#79ea0b87a93e5cd3727ca3d896855904ca980e56"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=7b20176#7b20176ad29046b270e99991e3a6b45b76b5afb6"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -4263,7 +4263,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-ssh"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=79ea0b8#79ea0b87a93e5cd3727ca3d896855904ca980e56"
+source = "git+https://github.com/plystra/scoplen-proto.git?rev=7b20176#7b20176ad29046b270e99991e3a6b45b76b5afb6"
 dependencies = [
  "russh",
  "scoplen-crypto",
